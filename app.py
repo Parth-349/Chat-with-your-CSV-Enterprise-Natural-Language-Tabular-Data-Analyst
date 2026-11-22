@@ -1411,31 +1411,6 @@ def main():
                     st.markdown("##### 📊 Data Preview")
                     st.dataframe(df.head(8), hide_index=True, **width_kwargs)
 
-            with st.expander("🔍 Inspect Dataset · Preview, Schema & Statistics", expanded=False):
-                preview_tab, schema_tab, stats_tab = st.tabs(
-                    ["📋 Preview", "🏷️ Schema", "📊 Statistics"]
-                )
-                with preview_tab:
-                    st.dataframe(df.head(10), **width_kwargs)
-                with schema_tab:
-                    row_count = max(len(df), 1)
-                    col_summary = pd.DataFrame({
-                        "Column Name": df.columns,
-                        "Data Type": [str(dtype) for dtype in df.dtypes],
-                        "Non-Null Count": df.notnull().sum().values,
-                        "Null Count": df.isnull().sum().values,
-                        "Null Percentage (%)": (
-                            (df.isnull().sum() / row_count) * 100
-                        ).round(2).values,
-                        "Unique Values": [df[column].nunique() for column in df.columns],
-                    })
-                    st.dataframe(col_summary, hide_index=True, **width_kwargs)
-                with stats_tab:
-                    if len(df) == 0:
-                        st.info("Statistics are unavailable because this dataset has no rows.")
-                    else:
-                        st.dataframe(df.describe(include="all").T, **width_kwargs)
-
         with col_right:
             with st.container(border=True):
                 status_text = "Active" if has_active_engine else "Unavailable"
@@ -1492,7 +1467,7 @@ def main():
                         )
 
                 st.markdown('<div class="panel-heading">🧠 AI Analysis Stream</div>', unsafe_allow_html=True)
-                with st.container(height=270, border=False):
+                with st.container(height=480, border=False):
                     for idx, message in enumerate(st.session_state.messages):
                         role = message.get("role", "user")
                         with st.chat_message(role, avatar="🧑‍💻" if role == "user" else "🤖"):
@@ -1706,6 +1681,31 @@ def main():
                             "📊 Active Query Visual"
                         )
                     st.rerun()
+
+        with st.expander("🔍 Inspect Dataset · Preview, Schema & Statistics", expanded=False):
+            preview_tab, schema_tab, stats_tab = st.tabs(
+                ["📋 Preview", "🏷️ Schema", "📊 Statistics"]
+            )
+            with preview_tab:
+                st.dataframe(df.head(10), **width_kwargs)
+            with schema_tab:
+                row_count = max(len(df), 1)
+                col_summary = pd.DataFrame({
+                    "Column Name": df.columns,
+                    "Data Type": [str(dtype) for dtype in df.dtypes],
+                    "Non-Null Count": df.notnull().sum().values,
+                    "Null Count": df.isnull().sum().values,
+                    "Null Percentage (%)": (
+                        (df.isnull().sum() / row_count) * 100
+                    ).round(2).values,
+                    "Unique Values": [df[column].nunique() for column in df.columns],
+                })
+                st.dataframe(col_summary, hide_index=True, **width_kwargs)
+            with stats_tab:
+                if len(df) == 0:
+                    st.info("Statistics are unavailable because this dataset has no rows.")
+                else:
+                    st.dataframe(df.describe(include="all").T, **width_kwargs)
 
     # ==========================================================================
     # TAB 2: Data Profiler & Preprocessing
