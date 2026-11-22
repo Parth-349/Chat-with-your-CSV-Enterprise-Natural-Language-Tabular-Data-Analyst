@@ -11,13 +11,16 @@ The system employs a multi-tiered pipeline separating natural language translati
 ```mermaid
 flowchart TD
     User["🧑‍💻 User Prompt"] --> Router["⚡ Zero-Config .env Auto-Router"]
-    Router --> BackendSelect{"Primary Route Available?"}
+    Router --> BackendSelect{"Groq Primary Available?"}
     
-    BackendSelect -- Yes --> Groq["⚡ Groq (Primary: gpt-oss-120b / gpt-oss-20b)"]
-    BackendSelect -- Quota / Error / Failover --> Gemini["🤖 Google Gemini (Backup: gemini-3.8-flash / flash-latest)"]
+    BackendSelect -- Yes --> Groq["⚡ Groq (Primary: gpt-oss-20b ~1,000 tok/s; low reasoning)"]
+    Groq -- Error / Failover --> GroqFallback["Groq fallback: gpt-oss-120b"]
+    GroqFallback -- Error / Failover --> Gemini["🤖 Google Gemini (Backup: gemini-4-hydrogen / flash-latest)"]
+    BackendSelect -- No Groq Key --> Gemini
     
     Gemini --> LLMOutput{"LLM Output"}
     Groq --> LLMOutput
+    GroqFallback --> LLMOutput
     
     LLMOutput -- DECLINE: reason --> DeclineUI["🛡️ Structured Refusal Banner (Escaped HTML)"]
     LLMOutput -- Python Code --> ASTCheck{"🔍 AST Allowlist Validator"}
@@ -139,7 +142,7 @@ Natural language translation to executable code faces several real-world failure
 | **4. Multi-Turn Context Drift** | Follow-up queries (*"Now filter to liked == 1"*, *"Plot that as a bar chart"*) fail without prior context. | **4-Turn Context Memory**: Recent user questions, generated code, and results are passed to the code generator for conversational continuity. |
 | **5. Off-Topic & Unsafe Requests** | Users ask general trivia (*"Who won the 1994 World Cup?"*) or request system commands. | **Structured Refusal Protocol**: Prompt instructs the LLM to output `DECLINE: <reason>`. The UI captures this, skips execution, and renders an amber refusal banner with escaped HTML. |
 | **6. Corrupt / Non-Standard CSV Formats** | CSVs with non-UTF-8 encodings (Latin1), mixed delimiters, or zero rows crash standard loaders. | **Resilient Multi-Encoding Loader**: Auto-falls back through `utf-8` -> `utf-8-sig` -> `latin1` and activates `sep=None, engine='python'` on delimiter parser errors. Prevents zero-division errors on empty datasets. |
-| **7. API Rate Limits & Provider Outages** | Provider rate limits or model outages disrupt user queries. | **Zero-Config Auto-Failover**: Automatically tries Groq primary (`openai/gpt-oss-120b`), then Groq fallback (`openai/gpt-oss-20b`), then fails over seamlessly to Google Gemini (`gemini-3.8-flash` -> `gemini-flash-latest`). |
+| **7. API Rate Limits & Provider Outages** | Provider rate limits or model outages disrupt user queries. | **Zero-Config Auto-Failover**: Tries Groq `openai/gpt-oss-20b` first (~1,000 tokens/s); both Groq gpt-oss models use `reasoning_effort="low"`, followed by `openai/gpt-oss-120b`, then Google Gemini `gemini-4-hydrogen` -> `gemini-flash-latest`. |
 
 ---
 
@@ -165,7 +168,7 @@ Run the complete test suite:
 python -m pytest tests/test_sandbox_and_csv.py -v
 ```
 
-All **40 unit and penetration tests** pass:
+All **45 unit and penetration tests** pass:
 - **Valid pandas operations**: Scalar aggregations, groupby summaries on `data.csv`.
 - **Series-to-CSV preservation**: Preserves category indices (e.g. `value_counts()`) on export.
 - **Matplotlib rendering**: Verifies charts are converted to valid PNG byte streams with PNG header signatures.
@@ -195,7 +198,7 @@ All **40 unit and penetration tests** pass:
 
 | Member | Role | Contributions |
 | :--- | :--- | :--- |
-| Member 1 — Name | AI/Data Chat | LLM routing, prompt-to-code generation, grounded responses |
-| Member 2 — Name | Security & Sandbox | AST validation, isolated execution, security regression tests |
-| Member 3 — Name | Profiler & Preprocessing | Data health analysis, cleaning workflow, deterministic EDA |
-| Member 4 — Name | Evaluation & UI | Benchmark suite, Streamlit UI, documentation and integration |
+| Sahil Talokar | AI/Data Chat | LLM routing, prompt-to-code generation, grounded responses |
+| Parth Ubahd | Security & Sandbox | AST validation, isolated execution, security regression tests |
+| Pranav Gandhle | Profiler & Preprocessing | Data health analysis, cleaning workflow, deterministic EDA |
+| Rohit Kisave | Evaluation & UI | Benchmark suite, Streamlit UI, documentation and integration |

@@ -9,6 +9,7 @@ import io
 import json
 import os
 from collections import Counter
+from types import SimpleNamespace
 import pytest
 import pandas as pd
 import numpy as np
@@ -22,7 +23,13 @@ from sandbox import (
     get_df_schema_prompt,
     SAFE_BUILTINS,
 )
-from app import get_available_routes
+from app import (
+    _build_gemini_generate_config,
+    call_llm_code_generator_single,
+    generate_grounded_answer,
+    get_available_routes,
+)
+from google.genai import types as gemini_types
 from profiler import (
     compute_data_profile,
     apply_preprocessing,
@@ -431,8 +438,8 @@ def test_suggested_prompts_detects_binary_target(spotify_df: pd.DataFrame):
 def test_get_available_routes_gemini_and_groq_order():
     """
     Verifies that get_available_routes builds an ordered failover route list:
-    1. Groq (primary: openai/gpt-oss-120b, fallback: openai/gpt-oss-20b)
-    2. Google Gemini (primary: gemini-3.8-flash, fallback: gemini-flash-latest)
+    1. Groq (primary: openai/gpt-oss-20b, fallback: openai/gpt-oss-120b)
+    2. Google Gemini (primary: gemini-4-hydrogen, fallback: gemini-flash-latest)
     without mutating keys or global os.environ.
     """
     mock_env = {
@@ -442,14 +449,81 @@ def test_get_available_routes_gemini_and_groq_order():
     routes = get_available_routes(mock_env)
     assert len(routes) == 2
     assert routes[0]["provider"] == "Groq"
-    assert routes[0]["primary_model"] == "openai/gpt-oss-120b"
-    assert routes[0]["fallback_model"] == "openai/gpt-oss-20b"
+    assert routes[0]["primary_model"] == "openai/gpt-oss-20b"
+    assert routes[0]["fallback_model"] == "openai/gpt-oss-120b"
     assert routes[0]["api_key"] == "mock_groq_key"
 
     assert routes[1]["provider"] == "Google Gemini"
-    assert routes[1]["primary_model"] == "gemini-3.8-flash"
+    assert routes[1]["primary_model"] == "gemini-4-hydrogen"
     assert routes[1]["fallback_model"] == "gemini-flash-latest"
     assert routes[1]["api_key"] == "mock_gemini_key"
+
+
+@pytest.mark.parametrize(
+    "model_name",
+    ["openai/gpt-oss-20b", "openai/gpt-oss-120b"],
+)
+def test_groq_gpt_oss_uses_low_reasoning_effort(monkeypatch, model_name):
+    """Verifies Groq gpt-oss generation requests use low reasoning effort."""
+    captured = {}
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="```python\nresult = 1\n```")
+                    )
+                ]
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("openai.OpenAI", FakeOpenAI)
+    code, decline, error = call_llm_code_generator_single(
+        prompt="Count records",
+        df_schema="",
+        provider="Groq",
+        model_name=model_name,
+        api_key="mock-key",
+    )
+
+    assert code == "result = 1"
+    assert decline is None
+    assert error is None
+    assert captured["extra_body"] == {"reasoning_effort": "low"}
+
+
+def test_grounded_summary_prefers_fast_groq_model(monkeypatch):
+    """Verifies summary generation uses the primary fast Groq model and low effort."""
+    captured = {}
+    routes = get_available_routes({"GROQ_API_KEY": "mock-key"})
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="Count: 1."))]
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("app.get_available_routes", lambda: routes)
+    monkeypatch.setattr("openai.OpenAI", FakeOpenAI)
+    summary = generate_grounded_answer(
+        prompt="How many rows?",
+        code="result = len(df)",
+        exec_res={"result": 1, "result_df": None, "stdout": "", "figure_png": None},
+    )
+
+    assert summary == "Count: 1."
+    assert captured["model"] == "openai/gpt-oss-20b"
+    assert captured["extra_body"] == {"reasoning_effort": "low"}
 
 
 def test_get_available_routes_handles_google_api_key_alias():
@@ -471,6 +545,34 @@ def test_get_available_routes_gemini_only():
     assert len(routes) == 1
     assert routes[0]["provider"] == "Google Gemini"
     assert routes[0]["api_key"] == "gemini_only_key"
+
+
+def test_gemini_4_config_uses_low_thinking():
+    """Verifies Gemini 4 requests low-latency thinking with the installed SDK."""
+    config = _build_gemini_generate_config(
+        gemini_types,
+        "gemini-4-hydrogen",
+        temperature=0.1,
+    )
+    assert config.thinking_config.thinking_level.value == "LOW"
+
+
+def test_gemini_4_config_falls_back_without_thinking_support():
+    """Verifies older SDK interfaces fall back to a normal generation config."""
+    class LegacyGenerateContentConfig:
+        def __init__(self, **options):
+            self.options = options
+
+    class LegacyTypes:
+        GenerateContentConfig = LegacyGenerateContentConfig
+
+    with pytest.warns(RuntimeWarning, match="unsupported"):
+        config = _build_gemini_generate_config(
+            LegacyTypes,
+            "gemini-4-hydrogen",
+            temperature=0.1,
+        )
+    assert config.options == {"temperature": 0.1}
 
 
 def test_get_available_routes_groq_only():

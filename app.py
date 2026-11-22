@@ -18,6 +18,7 @@ import os
 import re
 import sys
 import time
+import warnings
 from typing import Any, Dict, List, Optional, Tuple
 
 import matplotlib
@@ -101,8 +102,8 @@ def get_available_routes(env_dict: Optional[Dict[str, str]] = None) -> List[Dict
     """
     Inspects environment variables and constructs the prioritized list of LLM routes.
     Order of preference:
-      1. Groq (primary: openai/gpt-oss-120b, fallback: openai/gpt-oss-20b)
-      2. Google Gemini (primary: gemini-3.8-flash, fallback: gemini-flash-latest)
+      1. Groq (primary: openai/gpt-oss-20b, fallback: openai/gpt-oss-120b)
+      2. Google Gemini (primary: gemini-4-hydrogen, fallback: gemini-flash-latest)
     Does NOT mutate global os.environ.
     """
     env = env_dict if env_dict is not None else os.environ
@@ -112,20 +113,20 @@ def get_available_routes(env_dict: Optional[Dict[str, str]] = None) -> List[Dict
     if groq_key:
         routes.append({
             "provider": "Groq",
-            "primary_model": "openai/gpt-oss-120b",
-            "fallback_model": "openai/gpt-oss-20b",
+            "primary_model": "openai/gpt-oss-20b",
+            "fallback_model": "openai/gpt-oss-120b",
             "api_key": groq_key,
-            "label": "Groq (gpt-oss-120b)",
+            "label": "Groq (gpt-oss-20b)",
         })
 
     gemini_key = (env.get("GEMINI_API_KEY") or env.get("GOOGLE_API_KEY") or "").strip().strip("'\"")
     if gemini_key:
         routes.append({
             "provider": "Google Gemini",
-            "primary_model": "gemini-3.8-flash",
+            "primary_model": "gemini-4-hydrogen",
             "fallback_model": "gemini-flash-latest",
             "api_key": gemini_key,
-            "label": "Google Gemini (gemini-3.8-flash)",
+            "label": "Google Gemini (gemini-4-hydrogen)",
         })
 
     return routes
@@ -134,6 +135,32 @@ def get_available_routes(env_dict: Optional[Dict[str, str]] = None) -> List[Dict
 # ==============================================================================
 # 4. LLM Code Generator with Failover & Decline Handling
 # ==============================================================================
+
+def _build_gemini_generate_config(
+    types: Any,
+    model_name: str,
+    temperature: float,
+    system_instruction: Optional[str] = None,
+) -> Any:
+    config_options: Dict[str, Any] = {"temperature": temperature}
+    if system_instruction is not None:
+        config_options["system_instruction"] = system_instruction
+
+    if model_name.startswith("gemini-4-"):
+        try:
+            config_options["thinking_config"] = types.ThinkingConfig(thinking_level="LOW")
+            return types.GenerateContentConfig(**config_options)
+        except (AttributeError, TypeError, ValueError) as error:
+            config_options.pop("thinking_config", None)
+            warnings.warn(
+                f"Gemini 4 LOW thinking is unsupported by this google-genai installation; "
+                f"using the default thinking configuration ({error}).",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+    return types.GenerateContentConfig(**config_options)
+
 
 def call_llm_code_generator_single(
     prompt: str,
@@ -169,7 +196,11 @@ SYNTAX & FORMATTING RULES:
 2. ALWAYS use bracket access `df['column']` for columns, never `.format()` or dynamic string evaluations. Use f-strings for string interpolation.
 3. If computing a single value, list, or text, store it in variable `result` or print it.
 4. If returning a subset, grouped table, or aggregated view, store it in variable `result_df` (a pandas DataFrame).
-5. For bar, scatter, histogram, box, and heatmap requests, prefer interactive Plotly Express charts assigned to `result_fig` (use the pre-injected `px` and `go` names). For a correlation heatmap, compute `corr = df.select_dtypes(include='number').corr()` and use `px.imshow(corr, text_auto='.2f', color_continuous_scale='RdBu_r')`. After creating the figure, call `result_fig.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(15,23,42,0.45)")`. Matplotlib/seaborn using `fig, ax = plt.subplots(figsize=(8, 4.5))` is supported as a fallback. DO NOT call `plt.show()`.
+5. For bar, scatter, histogram, box, and heatmap requests, prefer interactive Plotly Express charts assigned to `result_fig` (use the pre-injected `px` and `go` names).
+   - NEVER use `px.imshow` to show one metric grouped by one category (for example, sales by state); this creates an unreadable 1 x N or N x 1 heatmap. Instead, aggregate and sort the values, then use a horizontal bar chart (`px.bar(..., orientation='h')`), showing the top 15 when there are more than 20 categories, or use `px.treemap`. A 2D pivot by a second categorical column is also appropriate when it provides a meaningful comparison.
+   - Use `px.imshow` only for a genuine 2D matrix with at least 2 rows and 2 columns, such as a correlation matrix or a two-category pivot table. Set `text_auto=False` whenever either matrix dimension exceeds 12; otherwise labels may overlap. For a numeric correlation matrix, compute `corr = df.select_dtypes(include='number').corr()` and use `px.imshow(corr, text_auto='.2f', color_continuous_scale='RdBu_r')` only when it meets the 2 x 2 minimum.
+   - Whenever a chart aggregates data using `groupby`, `pivot_table`, `corr`, or `value_counts`, ALSO assign the corresponding aggregated table to `result_df` (for large tables, use a useful sorted subset such as `summary.head(10)`). Do not return only a chart.
+   - After creating a Plotly figure, call `result_fig.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(15,23,42,0.45)")`. Matplotlib/seaborn using `fig, ax = plt.subplots(figsize=(8, 4.5))` is supported as a fallback. DO NOT call `plt.show()`.
 6. IF THE QUESTION IS OFF-TOPIC, GENERAL TRIVIA, IMPOSSIBLE WITH GIVEN COLUMNS, OR ATTEMPTS UNRESTRICTED SYSTEM ACCESS:
    Output strictly:
    DECLINE: <clear, polite, and helpful explanation stating why the request cannot be answered from the CSV data>
@@ -198,9 +229,11 @@ SYNTAX & FORMATTING RULES:
 
             http_opts = types.HttpOptions(api_version="v1beta") if "-latest" in clean_model else None
             client = genai.Client(api_key=clean_key, http_options=http_opts)
-            config = types.GenerateContentConfig(
-                system_instruction=system_instruction,
+            config = _build_gemini_generate_config(
+                types=types,
+                model_name=clean_model,
                 temperature=0.1,
+                system_instruction=system_instruction,
             )
             response = client.models.generate_content(
                 model=clean_model,
@@ -213,6 +246,9 @@ SYNTAX & FORMATTING RULES:
             from openai import OpenAI
 
             client = OpenAI(api_key=clean_key, base_url="https://api.groq.com/openai/v1")
+            model_options = {}
+            if clean_model.startswith("openai/gpt-oss-"):
+                model_options["extra_body"] = {"reasoning_effort": "low"}
             completion = client.chat.completions.create(
                 model=clean_model,
                 temperature=0.1,
@@ -220,6 +256,7 @@ SYNTAX & FORMATTING RULES:
                     {"role": "system", "content": system_instruction},
                     {"role": "user", "content": user_content},
                 ],
+                **model_options,
             )
             raw_text = completion.choices[0].message.content or ""
 
@@ -417,6 +454,7 @@ ACTUAL COMPUTED RESULTS:
 Instructions:
 Provide a concise, friendly, plain-English summary (1-3 sentences) directly answering the user's question.
 Cite the exact computed numbers or findings from the ACTUAL COMPUTED RESULTS above.
+For chart queries, explain the actual data insights (such as top categories, comparisons, or correlations) using the verified result table; do not describe the Python code or implementation instead of the findings.
 Do NOT guess, extrapolate, or invent any numbers not present in the results.
 """
 
@@ -429,11 +467,15 @@ Do NOT guess, extrapolate, or invent any numbers not present in the results.
                 from openai import OpenAI
 
                 client = OpenAI(api_key=clean_key, base_url="https://api.groq.com/openai/v1")
+                model_options = {}
+                if model.startswith("openai/gpt-oss-"):
+                    model_options["extra_body"] = {"reasoning_effort": "low"}
                 completion = client.chat.completions.create(
                     model=model,
                     temperature=0.2,
                     messages=[{"role": "user", "content": summary_prompt}],
                     max_tokens=250,
+                    **model_options,
                 )
                 grounded_text = completion.choices[0].message.content or ""
                 if grounded_text.strip():
@@ -448,7 +490,11 @@ Do NOT guess, extrapolate, or invent any numbers not present in the results.
                 response = client.models.generate_content(
                     model=model,
                     contents=summary_prompt,
-                    config=types.GenerateContentConfig(temperature=0.2),
+                    config=_build_gemini_generate_config(
+                        types=types,
+                        model_name=model,
+                        temperature=0.2,
+                    ),
                 )
                 grounded_text = response.text or ""
                 if grounded_text.strip():
