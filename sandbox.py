@@ -5,6 +5,7 @@ and robust data loading/sanitization.
 """
 
 import ast
+import builtins
 import datetime
 import difflib
 import io
@@ -15,6 +16,7 @@ import re
 import statistics
 import string
 import sys
+import tempfile
 from typing import Any, Dict, List, Optional, Tuple
 
 import matplotlib
@@ -83,6 +85,10 @@ PROHIBITED_METHODS = {
     "read_gbq",
     "write_json",
     "to_csv",
+    "to_html",
+    "to_string",
+    "to_latex",
+    "to_markdown",
     "to_clipboard",
     "to_excel",
     "to_json",
@@ -100,6 +106,10 @@ PROHIBITED_METHODS = {
     "savefig",
     "write_html",
     "write_image",
+    "print_figure",
+    "print_png",
+    "print_svg",
+    "print_pdf",
     "show",
     "imread",
     "imsave",
@@ -177,6 +187,27 @@ SAFE_BUILTINS: Dict[str, Any] = {
     "KeyError": KeyError,
     "IndexError": IndexError,
 }
+
+
+def _safe_import(
+    name: str,
+    globals: Optional[Dict[str, Any]] = None,
+    locals: Optional[Dict[str, Any]] = None,
+    fromlist: Tuple[str, ...] = (),
+    level: int = 0,
+) -> Any:
+    if level != 0:
+        raise PermissionError("Security Restriction: Relative imports are prohibited.")
+
+    root_module = name.split(".", 1)[0]
+    allowed = name in ALLOWED_MODULES or (
+        root_module in ALLOWED_MODULES
+        and any(name.startswith(f"{module}.") for module in ALLOWED_MODULES)
+    )
+    if not allowed:
+        raise PermissionError(f"Security Restriction: Importing module '{name}' is prohibited.")
+
+    return builtins.__import__(name, globals, locals, fromlist, level)
 
 
 def _is_safe_format_call(node: ast.Attribute) -> Tuple[bool, Optional[str]]:
@@ -296,9 +327,12 @@ def _isolated_worker(code: str, df: pd.DataFrame, conn: Any) -> None:
     # 2. Redirect stdout
     redirected_output = io.StringIO()
     old_stdout = sys.stdout
+    original_cwd = os.getcwd()
     sys.stdout = redirected_output
+    temporary_directory = None
 
     error = None
+    cleanup_error = None
     figure_png = None
     plotly_json = None
     result_val = None
@@ -308,8 +342,11 @@ def _isolated_worker(code: str, df: pd.DataFrame, conn: Any) -> None:
     plt.close("all")
     sns.set_theme(style="whitegrid", palette="deep")
 
+    worker_builtins = dict(SAFE_BUILTINS)
+    worker_builtins["__import__"] = _safe_import
+
     exec_globals: Dict[str, Any] = {
-        "__builtins__": SAFE_BUILTINS,
+        "__builtins__": worker_builtins,
         "__safe_fmt_attr__": _safe_fmt_attr,
         "df": df.copy(),
         "pd": pd,
@@ -327,6 +364,9 @@ def _isolated_worker(code: str, df: pd.DataFrame, conn: Any) -> None:
     }
 
     try:
+        temporary_directory = tempfile.TemporaryDirectory()
+        os.chdir(temporary_directory.name)
+
         class SafeFormatTransformer(ast.NodeTransformer):
             def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
                 node.value = self.visit(node.value)
@@ -390,27 +430,47 @@ def _isolated_worker(code: str, df: pd.DataFrame, conn: Any) -> None:
         error = f"{type(e).__name__}: {str(e)}"
     finally:
         sys.stdout = old_stdout
+        if temporary_directory is not None:
+            try:
+                os.chdir(original_cwd)
+            except Exception as e:
+                cleanup_error = f"Could not restore worker directory: {type(e).__name__}: {e}"
+            try:
+                temporary_directory.cleanup()
+            except Exception as e:
+                cleanup_detail = f"Could not clean worker directory: {type(e).__name__}: {e}"
+                cleanup_error = (
+                    f"{cleanup_error}; {cleanup_detail}"
+                    if cleanup_error
+                    else cleanup_detail
+                )
 
     stdout_str = redirected_output.getvalue().strip()
 
     try:
-        conn.send({
+        result_payload = {
             "stdout": stdout_str,
             "result": result_val,
             "result_df": result_df,
             "figure_png": figure_png,
             "plotly_json": plotly_json,
             "error": error,
-        })
+        }
+        if cleanup_error:
+            result_payload["cleanup_error"] = cleanup_error
+        conn.send(result_payload)
     except Exception as q_err:
-        conn.send({
+        result_payload = {
             "stdout": stdout_str,
             "result": str(result_val) if result_val is not None else None,
             "result_df": None,
             "figure_png": figure_png,
             "plotly_json": plotly_json,
             "error": f"SerializationError: {q_err}",
-        })
+        }
+        if cleanup_error:
+            result_payload["cleanup_error"] = cleanup_error
+        conn.send(result_payload)
     finally:
         conn.close()
 

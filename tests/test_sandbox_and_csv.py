@@ -7,6 +7,7 @@ Designed for Technical Jury Evaluation.
 
 import io
 import json
+import multiprocessing as mp
 import os
 from collections import Counter
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ import pandas as pd
 import numpy as np
 
 from sandbox import (
+    _isolated_worker,
     validate_code_ast,
     execute_pandas_code,
     load_csv_data,
@@ -81,6 +83,78 @@ result_df = df.groupby('liked')[['energy', 'loudness']].mean().reset_index()
     assert isinstance(res_group["result_df"], pd.DataFrame)
     assert "liked" in res_group["result_df"].columns
     assert len(res_group["result_df"]) == 2
+
+
+def test_sandbox_import_pandas_succeeds(spotify_df: pd.DataFrame):
+    res = execute_pandas_code(
+        "import pandas as pd\nresult = isinstance(df, pd.DataFrame)",
+        spotify_df,
+    )
+    assert res["error"] is None, f"Execution failed: {res['error']}"
+    assert res["result"] is True
+    assert "__import__" not in SAFE_BUILTINS
+
+
+def test_sandbox_from_math_import_succeeds(spotify_df: pd.DataFrame):
+    res = execute_pandas_code(
+        "from math import sqrt\nresult = sqrt(16)",
+        spotify_df,
+    )
+    assert res["error"] is None, f"Execution failed: {res['error']}"
+    assert res["result"] == 4.0
+
+
+def test_sandbox_import_os_remains_blocked(spotify_df: pd.DataFrame):
+    res = execute_pandas_code("import os", spotify_df)
+    assert "Security Restriction" in res["error"]
+
+
+@pytest.mark.parametrize(
+    ("code", "method"),
+    [
+        ('df.to_html("evil.html")', "to_html"),
+        ('df.to_string(buf="evil.txt")', "to_string"),
+        ("df.to_latex('evil.tex')", "to_latex"),
+        ("df.to_markdown('evil.md')", "to_markdown"),
+        ("fig.print_figure('evil')", "print_figure"),
+        ("fig.print_png('evil.png')", "print_png"),
+        ("fig.print_svg('evil.svg')", "print_svg"),
+        ("fig.print_pdf('evil.pdf')", "print_pdf"),
+    ],
+)
+def test_sandbox_blocks_serialization_methods(code: str, method: str):
+    valid, error = validate_code_ast(code)
+    assert not valid
+    assert method in error
+
+
+def test_isolated_worker_writes_only_in_temporary_directory(spotify_df: pd.DataFrame):
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    probe_path = os.path.join(project_root, "worker_probe.html")
+    root_entries_before = set(os.listdir(project_root))
+    assert not os.path.exists(probe_path)
+
+    context = mp.get_context("spawn")
+    parent_conn, child_conn = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_isolated_worker,
+        args=("df.head().to_html('worker_probe.html')", spotify_df, child_conn),
+    )
+    process.start()
+    child_conn.close()
+    try:
+        assert parent_conn.poll(20), "Isolated worker did not return before the timeout."
+        result = parent_conn.recv()
+        assert result["error"] is None
+    finally:
+        parent_conn.close()
+        process.join(timeout=10)
+        if process.is_alive():
+            process.terminate()
+            process.join()
+
+    assert set(os.listdir(project_root)) == root_entries_before
+    assert not os.path.exists(probe_path)
 
 
 def test_series_to_csv_export_preserves_index(spotify_df: pd.DataFrame):

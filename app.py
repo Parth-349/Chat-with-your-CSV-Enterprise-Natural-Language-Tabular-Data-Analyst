@@ -202,7 +202,7 @@ Dunder attribute or name access (such as __class__, __subclasses__, __builtins__
 Never access runtime system modules or attributes (such as plt.sys or df.eval or df.query or sns.load_dataset).
 
 SYNTAX & FORMATTING RULES:
-1. Refer to the dataset exclusively as `df`. Do NOT redefine `df` or reload files.
+1. Refer to the dataset exclusively as `df`. Do NOT redefine `df` or reload files. All libraries (pd, np, plt, sns, px, go, math, statistics, datetime) are already imported; import statements are unnecessary.
 2. ALWAYS use bracket access `df['column']` for columns, never `.format()` or dynamic string evaluations. Use f-strings for string interpolation.
 3. For text columns, use `df.select_dtypes(include=['object', 'string', 'category'])` so Pandas 3 StringDtype columns are included.
 4. If computing a single value, list, or text, store it in variable `result` or print it.

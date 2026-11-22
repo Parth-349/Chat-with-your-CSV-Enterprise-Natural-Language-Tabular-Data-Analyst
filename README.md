@@ -2,12 +2,6 @@
 
 An enterprise-style Streamlit application for asking natural-language questions about CSV data. It turns prompts into constrained pandas operations, executes them in an isolated zero-trust worker, and grounds summaries in the computed results. The three-tab workspace combines AI Data Chat, Data Profiling & Preprocessing, and Evaluation & Benchmarking.
 
-The private GitHub repository is:
-
-`https://github.com/Parth-349/Chat-with-your-CSV-Enterprise-Natural-Language-Tabular-Data-Analyst.git`
-
-Cloning requires access to the private repository and GitHub authentication configured on your machine.
-
 ## Setup
 
 ```powershell
@@ -54,10 +48,10 @@ flowchart TD
     CHAT --> PROMPT["Prompt + schema + recent conversation"]
     PROMPT --> ROUTER{"Groq primary / Gemini backup"}
     ROUTER --> CODE["Pandas code or structured decline"]
-    CODE --> AST["Zero-Trust AST validation"]
+    CODE --> AST["AST denylist + import allowlist"]
     AST -->|Rejected| BLOCK["Security block"]
     AST -->|Validated| WORKER["10-second multiprocessing spawn worker"]
-    WORKER --> SAFE["Scrubbed environment + SAFE_BUILTINS"]
+    WORKER --> SAFE["Scrubbed environment + restricted builtins"]
     SAFE --> OUTPUT["Scalar / result_df / Plotly JSON / Matplotlib PNG"]
     OUTPUT --> SUMMARY["Grounded post-execution summary"]
     SUMMARY --> TRACE["Chat answer + four-stage pipeline trace"]
@@ -73,10 +67,10 @@ flowchart TD
 | File | Responsibility |
 | :--- | :--- |
 | `app.py` | Three-tab glassmorphism UI in Obsidian-Teal and Champagne-Gold. Automatically routes Groq first (`openai/gpt-oss-120b`, then `openai/gpt-oss-20b`) and Gemini second (`gemini-4-hydrogen`, then `gemini-flash-latest`). Includes four-turn conversation context, self-healing query flow, a four-stage Agent Pipeline Trace, and a post-execution grounded summarizer. Chart-generation prompts guard against 1D heatmaps and require aggregated charts to also return `result_df`. Plotly HTML and Matplotlib PNG exports are supported. |
-| `sandbox.py` | Zero-trust AST allowlist for 11 approved library/module names: `pandas`, `numpy`, `matplotlib`, `matplotlib.pyplot`, `seaborn`, `plotly`, `plotly.express`, `plotly.graph_objects`, `math`, `statistics`, and `datetime`. Blocks `os`/`sys` imports and `plt.sys` traversal, disk-writing methods including `write_html`, `write_image`, `write_json`, and `show`, dynamic `df.eval`/`df.query`, and `sns.load_dataset`. The worker also uses a `SafeFormatTransformer` AST rewrite backed by the restricted `_safe_fmt_attr` runtime proxy. Execution uses a 10-second `multiprocessing` spawn worker, `SAFE_BUILTINS`, and environment-secret scrubbing. Includes `difflib` column-name recovery and a multi-encoding CSV loader. |
+| `sandbox.py` | AST denylist + import allowlist for 11 approved library/module names: `pandas`, `numpy`, `matplotlib`, `matplotlib.pyplot`, `seaborn`, `plotly`, `plotly.express`, `plotly.graph_objects`, `math`, `statistics`, and `datetime`. Blocks `os`/`sys` imports and `plt.sys` traversal, known file-writing and rendering methods including `write_html`, `write_image`, `write_json`, `show`, and tabular serialization methods, dynamic `df.eval`/`df.query`, and `sns.load_dataset`. The worker also uses a `SafeFormatTransformer` AST rewrite backed by the restricted `_safe_fmt_attr` runtime proxy. Execution uses restricted worker builtins, environment-secret scrubbing, a throwaway temporary working directory, and a 10-second process timeout. Relative-path writes land in the temporary directory; this is defense in depth, not OS-level isolation. Includes `difflib` column-name recovery and a multi-encoding CSV loader. |
 | `profiler.py` | Data Health Score (0–100), column diagnostics, and a Pandas 3-compatible preprocessing pipeline for `StringDtype` and nullable `Int64`/`Float64`, with an audit trail. Also provides deterministic Auto-EDA insights and Markdown Session Report export. |
 | `eval_suite.py` | Offline security/reference-query audit, provider comparison, and a 16-case live benchmark suite with CSV/JSON exports. |
-| `tests/test_sandbox_and_csv.py` | 59 automated regression, sandbox-security, profiler, CSV, routing, and evaluation tests. |
+| `tests/test_sandbox_and_csv.py` | 71 automated regression, sandbox-security, profiler, CSV, routing, and evaluation tests. |
 | `.streamlit/config.toml` | Dark Obsidian/emerald and champagne theme colors used by the UI. |
 | `requirements.txt` | Python runtime and test dependencies, including Streamlit, pandas, Plotly, provider SDKs, and pytest. |
 | `data.csv` | Bundled sample dataset: 195 rows × 14 columns. |
@@ -97,7 +91,7 @@ The following results are the measured snapshot recorded on **2026-11-22**. Live
 
 | Suite | Result |
 | :--- | :--- |
-| `python -m pytest -v` | **59 / 59 passed (100%)** |
+| `python -m pytest -v` | **71 / 71 passed (100%)** |
 
 ### Offline Sandbox & Guardrail Audit
 
@@ -117,16 +111,16 @@ The following results are the measured snapshot recorded on **2026-11-22**. Live
 | Auto Router — Groq → Gemini, 6 queries | **83.33% (5/6)** | **100.0% (6/6)** | **100.0%** | **4,411.04 ms** |
 | Gemini baseline — `gemini-4-hydrogen`, 6 queries | **66.67%** reported | **33.33%** reported | — | **21,329.74–33,317.45 ms** reported |
 
-The Groq fast subset gained **16.67 percentage points** from Pass@1 to Pass@3. Its 2,269.29 ms average was about **7.4× faster** than the 16,699.76 ms Gemini run recorded after free-tier quota exhaustion. That quota-exhausted Gemini run reported **0.0%** success at 16,699.76 ms. The Groq full-suite result was paired with a **100% security block rate** and **0% false-positive rate**.
+The Groq fast subset gained **16.67 percentage points** from Pass@1 to Pass@3. Groq averaged 2,269 ms and the Auto Router averaged 4,411 ms, versus 21,330 ms for the Gemini baseline, which scored 66.67% Pass@1 on the same 6-query subset. A later Gemini run reported 0% success because the free-tier daily quota was exhausted; that result is not a model-quality comparison. The Groq full-suite result was paired with a **100% security block rate** and **0% false-positive rate**.
 
 ## Jury Q&A defense
 
 ### Q1 — How does the application stop unsafe or incorrect queries?
 
-- Generated code is parsed and checked against a strict AST allowlist before execution.
-- Imports, dunder traversal, system/module access, dynamic evaluation, and file/network I/O methods are blocked; `write_json`, `write_html`, `write_image`, and `show` are prohibited.
-- Code runs on a copied DataFrame in a spawned worker with restricted builtins, environment-secret scrubbing, and a 10-second timeout.
-- The worker returns computed scalars, tables, Plotly JSON, or Matplotlib PNG; it cannot save generated charts to disk.
+- Generated code is parsed and checked by an AST denylist, with a restricted import allowlist and worker-local guarded builtins.
+- Dunder traversal, system/module access, dynamic evaluation, and known file/network methods are blocked; serialization and rendering methods including `write_json`, `write_html`, `write_image`, `show`, and tabular exports are prohibited.
+- Code runs on a copied DataFrame in a spawned worker with environment-secret scrubbing, a throwaway temporary working directory, and a 10-second timeout.
+- Relative-path writes land in the temporary working directory. This is defense in depth, not OS-level isolation.
 - Offline audit results measure the security suite separately from live provider behavior.
 
 ### Q2 — How does the application recover when natural-language translation fails?
@@ -143,6 +137,6 @@ The Groq fast subset gained **16.67 percentage points** from Pass@1 to Pass@3. I
 | Member | Role | Contributions |
 | :--- | :--- | :--- |
 | Sahil Talokar | AI Data Chat | Routing, prompt-to-code generation, grounded responses, and chat UI |
-| Parth Ubahd | Security & Sandbox | AST validation, isolated execution, and security testing |
+| Parth Ubhad | Security & Sandbox | AST validation, isolated execution, and security testing |
 | Pranav Gandhle | Profiler & Preprocessing | Data health analysis, preprocessing, and deterministic Auto-EDA |
 | Rohit Kisave | Evaluation & Integration | Benchmarking, UI integration, testing, and documentation |
