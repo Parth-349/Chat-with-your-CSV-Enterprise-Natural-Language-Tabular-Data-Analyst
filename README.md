@@ -140,9 +140,14 @@ Natural language translation to executable code faces several real-world failure
 ## 🎨 Translucent Glassmorphism UI Highlights
 
 - **Dark Aurora Canvas**: `#070b14` canvas with glowing radial blurs (indigo, purple, cyan).
-- **Glassmorphic Cards**: 4 frosted KPI metric cards with backdrop blurs and subtle hairline borders.
-- **Minimal Sidebar**: File upload, sample dataset loader, live AI engine connection pill, code toggle, and conversation reset.
-- **Direct Asset Downloads**: Deterministic CSV export for tables (`dl_csv_{idx}`) and PNG download for charts (`dl_png_{idx}`).
+- **Multi-Tab Workspace**:
+  - **Tab 1 (`💬 AI Data Chat`)**: Interactive Q&A, data inspector, smart suggestions, multi-turn follow-ups, and downloads.
+  - **Tab 2 (`🧹 Data Profiler & Preprocessing`)**: Automated Data Health Score (0–100), per-column diagnostics, interactive cleaning pipeline (duplicates, whitespace, imputation, outlier clipping, constant drops), reversible state management, and auto-EDA insights.
+  - **Tab 3 (`🧪 Evaluation & Benchmark`)**: Offline sandbox/security audit, optional live provider benchmarks, pass@1 and self-healed pass@3 metrics, provider comparisons, and CSV/JSON exports.
+- **Session Report Export**: Generates a comprehensive Markdown report (.md) detailing dataset metrics, preprocessing audit trail, column diagnostics, and verified Q&A history.
+- **Glassmorphic Cards**: Frosted KPI metric cards with backdrop blurs and subtle hairline borders.
+- **Minimal Sidebar**: File upload, sample dataset loader, live AI engine connection pill, session report download, code toggle, and conversation reset.
+- **Direct Asset Downloads**: Cleaned CSV export, result table CSV (`dl_csv_{idx}`), chart PNG download (`dl_png_{idx}`), and Session Report Markdown export.
 - **Native Streamlit Compatibility**: Automatically uses `width="stretch"` on Streamlit >= 1.50 and `use_container_width=True` on older versions to eliminate deprecation warnings.
 
 ---
@@ -154,7 +159,7 @@ Run the complete test suite:
 python -m pytest tests/test_sandbox_and_csv.py -v
 ```
 
-All **23 unit and penetration tests** pass:
+All **36 unit and penetration tests** pass:
 - **Valid pandas operations**: Scalar aggregations, groupby summaries on `data.csv`.
 - **Series-to-CSV preservation**: Preserves category indices (e.g. `value_counts()`) on export.
 - **Matplotlib rendering**: Verifies charts are converted to valid PNG byte streams with PNG header signatures.
@@ -174,3 +179,5 @@ All **23 unit and penetration tests** pass:
 - **Fuzzy column correction**: `difflib` suggestions on misspelled column names.
 - **Comparative prompt generation**: Automatic detection of binary columns (`liked`) for comparative analysis.
 - **Zero-Config Router Tests**: Groq -> Google Gemini priority order, alias handling (`GOOGLE_API_KEY`), single-key fallbacks, empty environment handling.
+- **Phase 1 Profiler & Preprocessing Tests**: Data health scoring, 0-row DataFrame handling, duplicate & whitespace cleaning, median/mode imputation & outlier clipping (preserving binary flags), and Session Report markdown generation.
+- **Evaluation Suite Tests**: 16-case benchmark structure, 100% offline security block rate, 0% false-positive rate, portable CSV/JSON exports, and mocked retry/provider comparison coverage.

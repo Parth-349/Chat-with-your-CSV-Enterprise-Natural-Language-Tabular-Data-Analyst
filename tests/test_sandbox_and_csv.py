@@ -6,7 +6,9 @@ Designed for Technical Jury Evaluation.
 """
 
 import io
+import json
 import os
+from collections import Counter
 import pytest
 import pandas as pd
 import numpy as np
@@ -21,6 +23,22 @@ from sandbox import (
     SAFE_BUILTINS,
 )
 from app import get_available_routes
+from profiler import (
+    compute_data_profile,
+    apply_preprocessing,
+    build_deterministic_eda_insights,
+    export_session_report_markdown,
+)
+from eval_suite import (
+    BENCHMARK_SUITE,
+    RESULT_COLUMNS,
+    build_benchmark_suite,
+    compare_providers_eval,
+    export_metrics_json,
+    export_results_csv,
+    run_live_llm_eval,
+    run_offline_security_eval,
+)
 
 
 @pytest.fixture
@@ -441,3 +459,225 @@ def test_get_available_routes_empty():
     """Verifies safe empty list returned when no keys exist in environment."""
     routes = get_available_routes({})
     assert routes == []
+
+
+# ==============================================================================
+# 5. Data Profiler & Preprocessing Pipeline Tests (Phase 1 Deliverables)
+# ==============================================================================
+
+def test_compute_data_profile_on_spotify_data(spotify_df: pd.DataFrame):
+    """Verifies data health scoring, summary counts, column diagnostics, and correlations."""
+    prof = compute_data_profile(spotify_df)
+    assert 0 <= prof["health_score"] <= 100
+    assert prof["rows"] == 195
+    assert prof["cols"] == 14
+    assert prof["missing_cells"] == 0
+    assert prof["duplicate_rows"] == 0
+    assert isinstance(prof["column_report"], pd.DataFrame)
+    assert len(prof["column_report"]) == 14
+    assert "Detected Issues" in prof["column_report"].columns
+    assert len(prof["top_correlations"]) > 0
+    assert prof["top_correlations"][0]["abs_correlation"] > 0
+
+
+def test_compute_data_profile_zero_rows():
+    """Verifies that an empty DataFrame computes without ZeroDivisionError."""
+    df_empty = pd.DataFrame(columns=["feature_a", "feature_b", "feature_c"])
+    prof = compute_data_profile(df_empty)
+    assert prof["rows"] == 0
+    assert prof["cols"] == 3
+    assert prof["health_score"] == 100.0
+    assert prof["missing_cells"] == 0
+    assert isinstance(prof["column_report"], pd.DataFrame)
+    assert len(prof["top_correlations"]) == 0
+
+
+def test_apply_preprocessing_duplicates_and_whitespace():
+    """Verifies exact duplicate removal, text trimming, and empty string conversion."""
+    df_test = pd.DataFrame({
+        "text_col": ["  apple  ", "banana", "  apple  ", "   "],
+        "num_col": [1, 2, 1, 4]
+    })
+    cleaned_df, logs = apply_preprocessing(df_test, drop_duplicates=True, strip_whitespace=True)
+    assert len(cleaned_df) == 3
+    assert cleaned_df["text_col"].iloc[0] == "apple"
+    assert pd.isna(cleaned_df["text_col"].iloc[2])
+    assert any("duplicate" in log.lower() for log in logs)
+    assert any("whitespace" in log.lower() for log in logs)
+
+
+def test_apply_preprocessing_imputation_and_outliers(spotify_df: pd.DataFrame):
+    """
+    Verifies median/mode null imputation and IQR outlier clipping
+    while preserving binary 0/1 target columns (e.g. liked).
+    """
+    df_dirty = spotify_df.copy()
+    df_dirty.loc[0, "danceability"] = np.nan
+    df_dirty.loc[1, "duration_ms"] = 99999999
+
+    cleaned_df, logs = apply_preprocessing(
+        df_dirty,
+        impute_strategy="median_mode",
+        outlier_strategy="clip_iqr"
+    )
+    assert cleaned_df["danceability"].isnull().sum() == 0
+    assert cleaned_df["duration_ms"].max() < 99999999
+    # Ensure binary target column remains strictly 0 and 1
+    assert set(cleaned_df["liked"].unique()).issubset({0, 1})
+    assert any("imputed" in log.lower() for log in logs)
+    assert any("clipped" in log.lower() or "winsorized" in log.lower() for log in logs)
+
+
+def test_export_session_report_markdown(spotify_df: pd.DataFrame):
+    """Verifies that the session report markdown formats dataset info, audit steps, and Q&A."""
+    prof = compute_data_profile(spotify_df)
+    logs = ["Dropped 0 duplicates.", "Imputed 0 nulls."]
+    messages = [
+        {"role": "user", "content": "What is the average danceability?"},
+        {
+            "role": "assistant",
+            "content": "The average danceability is 0.64.",
+            "code": "result = df['danceability'].mean()",
+            "route_label": "Groq (gpt-oss-120b)",
+        }
+    ]
+    report = export_session_report_markdown("Spotify Tracks", spotify_df, prof, logs, messages)
+    assert isinstance(report, str)
+    assert "# 📊 Data Analysis & Q&A Session Report: Spotify Tracks" in report
+    assert "Data Health Score" in report
+    assert "Dropped 0 duplicates." in report
+    assert "What is the average danceability?" in report
+    assert "result = df['danceability'].mean()" in report
+    assert "Groq (gpt-oss-120b)" in report
+
+
+# ==============================================================================
+# 6. Gen-AI Evaluation Suite Tests
+# ==============================================================================
+
+def test_offline_security_eval_passes_without_live_api_calls(spotify_df: pd.DataFrame):
+    """Verifies all security payloads are blocked and benign reference queries are allowed."""
+    result = run_offline_security_eval(spotify_df)
+    metrics = result["metrics"]
+
+    assert result["mode"] == "Offline Sandbox & Guardrail Audit"
+    assert metrics["security_block_rate_pct"] == 100.0
+    assert metrics["false_positive_rate_pct"] == 0.0
+    assert metrics["security_attack_cases"] == 4
+    assert metrics["security_blocked_cases"] == 4
+    assert metrics["average_sandbox_latency_ms"] >= 0
+
+
+def test_eval_suite_structure_and_export_formats(spotify_df: pd.DataFrame):
+    """Verifies the 16 benchmark cases and deterministic CSV/JSON export shapes."""
+    assert len(BENCHMARK_SUITE) == 16
+    categories = Counter(case["category"] for case in BENCHMARK_SUITE)
+    assert categories == {
+        "Aggregation": 4,
+        "Visualization": 3,
+        "Edge / Recovery": 3,
+        "Security Attack": 4,
+        "Innocent Edge Cases": 2,
+    }
+
+    adapted_suite = build_benchmark_suite(spotify_df)
+    typo_case = next(case for case in adapted_suite if case["case_id"] == "EDGE-01")
+    assert "danceabiliy" in typo_case["prompt"]
+
+    sample_result = {
+        "mode": "Offline Sandbox & Guardrail Audit",
+        "run_at": "2026-11-22T00:00:00+00:00",
+        "metrics": {"security_block_rate_pct": 100.0, "false_positive_rate_pct": 0.0},
+        "results": pd.DataFrame(
+            [{
+                "Case ID": "SEC-01",
+                "Category": "Security Attack",
+                "Prompt": "Test a blocked import.",
+                "Route Used": "Sandbox",
+                "Pass@1": True,
+                "Final Status": "Passed (blocked)",
+                "Retries": 0,
+                "Latency (ms)": 1.25,
+                "Error/Notes": "Security Restriction",
+            }],
+            columns=RESULT_COLUMNS,
+        ),
+    }
+    csv_text = export_results_csv(sample_result)
+    csv_frame = pd.read_csv(io.StringIO(csv_text))
+    assert list(csv_frame.columns) == RESULT_COLUMNS
+    assert csv_frame.loc[0, "Case ID"] == "SEC-01"
+    assert csv_frame.loc[0, "Latency (ms)"] == 1.25
+
+    metrics = json.loads(export_metrics_json(sample_result))
+    assert metrics["mode"] == sample_result["mode"]
+    assert metrics["metrics"]["security_block_rate_pct"] == 100.0
+
+
+def test_live_eval_retries_and_provider_comparison_without_api_calls(spotify_df: pd.DataFrame):
+    """Verifies live-eval accounting with fake provider/executor callbacks only."""
+    def fake_generator(
+        prompt,
+        df_schema,
+        provider,
+        model_name,
+        api_key,
+        conversation_history=None,
+        retry_error=None,
+        previous_code=None,
+    ):
+        if "groupby" in prompt and not retry_error:
+            return "result = df['missing_column'].mean()", None, None
+        if "groupby" in prompt:
+            return "result = int(len(df))", None, None
+        if "capital of France" in prompt:
+            return None, "This question is outside the dataset.", None
+        if "globals" in prompt:
+            return None, "I cannot inspect Python internals.", None
+        return "result = int(len(df))", None, None
+
+    def fake_executor(code, _df):
+        if "missing_column" in code:
+            return {"error": "KeyError: missing_column"}
+        return {"error": None}
+
+    routes = [
+        {
+            "provider": "Groq",
+            "primary_model": "primary-model",
+            "fallback_model": "fallback-model",
+            "api_key": "test-groq-key",
+            "label": "Groq",
+        },
+        {
+            "provider": "Google Gemini",
+            "primary_model": "primary-model",
+            "fallback_model": "fallback-model",
+            "api_key": "test-gemini-key",
+            "label": "Google Gemini",
+        },
+    ]
+    result = run_live_llm_eval(
+        spotify_df,
+        routes,
+        fake_generator,
+        provider="Groq",
+        suite_mode="Fast Subset (6 queries)",
+        executor=fake_executor,
+    )
+    assert result["metrics"]["pass_at_1_accuracy_pct"] < 100
+    assert result["metrics"]["self_healed_pass_at_3_accuracy_pct"] == 100
+    assert result["metrics"]["off_topic_rejection_accuracy_pct"] == 100
+    groupby_row = result["results"].loc[result["results"]["Case ID"] == "AGG-03"].iloc[0]
+    assert groupby_row["Retries"] == 1
+    assert groupby_row["Final Status"] == "Passed after retries/fallback"
+
+    comparison = compare_providers_eval(
+        spotify_df,
+        routes,
+        fake_generator,
+        suite_mode="Fast Subset (6 queries)",
+        executor=fake_executor,
+    )
+    assert comparison["provider_comparison"]["Provider"].tolist() == ["Groq", "Google Gemini"]
+    assert len(comparison["results"]) == 12
