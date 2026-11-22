@@ -51,7 +51,11 @@ def compute_data_profile(df: pd.DataFrame) -> Dict[str, Any]:
     duplicate_rows = int(df.duplicated().sum())
     duplicate_pct = round((duplicate_rows / n_rows) * 100, 2) if n_rows > 0 else 0.0
 
-    num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    num_cols = [
+        col for col in df.columns
+        if pd.api.types.is_numeric_dtype(df[col])
+        and not pd.api.types.is_bool_dtype(df[col])
+    ]
     cat_cols = [c for c in df.columns if c not in num_cols]
     numeric_cols_count = len(num_cols)
     categorical_cols_count = len(cat_cols)
@@ -80,7 +84,7 @@ def compute_data_profile(df: pd.DataFrame) -> Dict[str, Any]:
         if null_count > 0:
             issues.append(f"Missing ({null_pct}%)")
 
-        if unique_count <= 1:
+        if df[col].nunique(dropna=False) <= 1:
             issues.append("Constant")
 
         if is_num:
@@ -106,7 +110,9 @@ def compute_data_profile(df: pd.DataFrame) -> Dict[str, Any]:
                 if iqr > 0:
                     lower_bound = q25 - 1.5 * iqr
                     upper_bound = q75 + 1.5 * iqr
-                    outliers_mask = (df[col] < lower_bound) | (df[col] > upper_bound)
+                    outliers_mask = (
+                        (df[col] < lower_bound) | (df[col] > upper_bound)
+                    ).fillna(False).astype(bool)
                     col_outliers = int(outliers_mask.sum())
                     if col_outliers > 0:
                         total_outliers += col_outliers
@@ -209,13 +215,43 @@ def apply_preprocessing(
 
     # 2. Trim whitespace on text columns & convert empty strings to NaN
     if strip_whitespace:
-        text_cols = df_clean.select_dtypes(include=["object", "string"]).columns
+        text_cols = df_clean.select_dtypes(
+            include=["object", "string", "category"]
+        ).columns
         trimmed_count = 0
+
+        def strip_text_value(value: Any) -> Any:
+            if value is None or value is pd.NA:
+                return np.nan
+            if isinstance(value, str):
+                stripped_value = value.strip()
+                return stripped_value if stripped_value else np.nan
+            return value
+
         for col in text_cols:
             original = df_clean[col]
-            # Strip string values while keeping actual NaNs intact
-            stripped = original.astype(str).str.strip().replace("", np.nan)
-            df_clean[col] = stripped.where(original.notnull(), np.nan)
+            if isinstance(original.dtype, pd.CategoricalDtype):
+                category_mapping = {}
+                new_categories = []
+                for category in original.cat.categories:
+                    stripped_category = strip_text_value(category)
+                    category_mapping[category] = stripped_category
+                    if not pd.isna(stripped_category) and stripped_category not in new_categories:
+                        new_categories.append(stripped_category)
+                values = original.astype(object).map(
+                    lambda value: (
+                        category_mapping.get(value, value)
+                        if not pd.isna(value)
+                        else np.nan
+                    )
+                )
+                df_clean[col] = pd.Categorical(
+                    values,
+                    categories=new_categories,
+                    ordered=original.cat.ordered,
+                )
+            else:
+                df_clean[col] = original.astype(object).map(strip_text_value)
             trimmed_count += 1
         if trimmed_count > 0:
             audit_logs.append(f"Trimmed whitespace across {trimmed_count} text column(s) and converted empty strings to null.")
@@ -232,18 +268,36 @@ def apply_preprocessing(
     elif impute_strategy in ("median_mode", "mean_mode"):
         imputed_details: List[str] = []
         for col in df_clean.columns:
-            if df_clean[col].isnull().sum() > 0:
-                if np.issubdtype(df_clean[col].dtype, np.number):
-                    fill_val = df_clean[col].median() if impute_strategy == "median_mode" else df_clean[col].mean()
-                    if not np.isnan(fill_val):
-                        df_clean[col] = df_clean[col].fillna(fill_val)
+            series = df_clean[col]
+            if series.isnull().sum() > 0:
+                if (
+                    pd.api.types.is_numeric_dtype(series)
+                    and not pd.api.types.is_bool_dtype(series)
+                ):
+                    fill_val = (
+                        series.median()
+                        if impute_strategy == "median_mode"
+                        else series.mean()
+                    )
+                    if not pd.isna(fill_val):
+                        if pd.api.types.is_integer_dtype(series.dtype):
+                            if float(fill_val).is_integer():
+                                fill_val = int(fill_val)
+                            else:
+                                series = series.astype("Float64")
+                        df_clean[col] = series.fillna(fill_val)
                         stat_name = "median" if impute_strategy == "median_mode" else "mean"
                         imputed_details.append(f"'{col}' ({stat_name}: {round(float(fill_val), 3)})")
                 else:
-                    mode_series = df_clean[col].mode()
+                    mode_series = series.mode(dropna=True)
                     if not mode_series.empty:
                         mode_val = mode_series.iloc[0]
-                        df_clean[col] = df_clean[col].fillna(mode_val)
+                        if (
+                            isinstance(series.dtype, pd.CategoricalDtype)
+                            and mode_val not in series.cat.categories
+                        ):
+                            continue
+                        df_clean[col] = series.fillna(mode_val)
                         imputed_details.append(f"'{col}' (mode: '{mode_val}')")
         if imputed_details:
             strat_label = "median/mode" if impute_strategy == "median_mode" else "mean/mode"
@@ -252,29 +306,46 @@ def apply_preprocessing(
     # 4. Outlier Handling (Clip or Remove IQR, excluding binary 0/1 columns)
     if outlier_strategy == "clip_iqr":
         clipped_details: List[str] = []
-        num_cols = df_clean.select_dtypes(include=[np.number]).columns
+        num_cols = [
+            col for col in df_clean.columns
+            if pd.api.types.is_numeric_dtype(df_clean[col])
+            and not pd.api.types.is_bool_dtype(df_clean[col])
+        ]
         for col in num_cols:
-            unique_vals = df_clean[col].dropna().unique()
+            series = df_clean[col]
+            unique_vals = series.dropna().unique()
             # Skip binary 0/1 flags
             if len(unique_vals) <= 2 and set(unique_vals).issubset({0, 1, 0.0, 1.0}):
                 continue
 
-            q25 = df_clean[col].quantile(0.25)
-            q75 = df_clean[col].quantile(0.75)
+            q25 = series.quantile(0.25)
+            q75 = series.quantile(0.75)
             iqr = q75 - q25
             if iqr > 0:
                 lower_b = q25 - 1.5 * iqr
                 upper_b = q75 + 1.5 * iqr
                 outliers_count = int(((df_clean[col] < lower_b) | (df_clean[col] > upper_b)).sum())
                 if outliers_count > 0:
-                    df_clean[col] = df_clean[col].clip(lower=lower_b, upper=upper_b)
+                    if (
+                        pd.api.types.is_integer_dtype(series.dtype)
+                        and (
+                            not float(lower_b).is_integer()
+                            or not float(upper_b).is_integer()
+                        )
+                    ):
+                        series = series.astype("Float64")
+                    df_clean[col] = series.clip(lower=lower_b, upper=upper_b)
                     clipped_details.append(f"'{col}' ({outliers_count} clipped to [{round(lower_b, 2)}, {round(upper_b, 2)}])")
 
         if clipped_details:
             audit_logs.append(f"Winsorized/clipped IQR outliers in: {', '.join(clipped_details)}.")
 
     elif outlier_strategy == "remove_iqr":
-        num_cols = df_clean.select_dtypes(include=[np.number]).columns
+        num_cols = [
+            col for col in df_clean.columns
+            if pd.api.types.is_numeric_dtype(df_clean[col])
+            and not pd.api.types.is_bool_dtype(df_clean[col])
+        ]
         outlier_mask = pd.Series(False, index=df_clean.index)
         for col in num_cols:
             unique_vals = df_clean[col].dropna().unique()
@@ -286,7 +357,10 @@ def apply_preprocessing(
             if iqr > 0:
                 lower_b = q25 - 1.5 * iqr
                 upper_b = q75 + 1.5 * iqr
-                outlier_mask = outlier_mask | (df_clean[col] < lower_b) | (df_clean[col] > upper_b)
+                col_outliers = (
+                    (df_clean[col] < lower_b) | (df_clean[col] > upper_b)
+                ).fillna(False).astype(bool)
+                outlier_mask = outlier_mask | col_outliers
 
         removed_count = int(outlier_mask.sum())
         if removed_count > 0:
@@ -341,16 +415,19 @@ def build_deterministic_eda_insights(df: pd.DataFrame, profile: Dict[str, Any]) 
         )
 
     # 4. Binary Target Distribution (e.g. liked, target, mode)
-    num_cols = df.select_dtypes(include=[np.number]).columns
+    num_cols = [
+        col for col in df.columns
+        if pd.api.types.is_numeric_dtype(df[col])
+        and not pd.api.types.is_bool_dtype(df[col])
+    ]
     binary_cols = [c for c in num_cols if df[c].dropna().nunique() == 2]
     target_col = "liked" if "liked" in binary_cols else (binary_cols[0] if binary_cols else None)
 
     if target_col is not None and profile["rows"] > 0:
         vc = df[target_col].value_counts(normalize=True) * 100
-        val_0 = vc.get(0, 0.0)
-        val_1 = vc.get(1, 0.0)
+        first_label, second_label = vc.index[0], vc.index[1]
         insights.append(
-            f"**Target Distribution (`{target_col}`):** Binary target split is **{val_1:.1f}% class 1** vs **{val_0:.1f}% class 0**, providing a solid foundation for classification/comparative analysis."
+            f"**Target Distribution (`{target_col}`):** Binary target split is **{vc.iloc[0]:.1f}% class {first_label}** vs **{vc.iloc[1]:.1f}% class {second_label}**, providing a solid foundation for classification/comparative analysis."
         )
 
     # 5. Widest-spread or skewed feature

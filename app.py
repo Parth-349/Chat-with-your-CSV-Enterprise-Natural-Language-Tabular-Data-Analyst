@@ -2,7 +2,7 @@
 Chat-with-your-CSV: Enterprise Natural-Language Tabular Data Analyst
 Upgraded with:
 - Zero-Config .env Auto-Router with Ordered Automatic Failover (Groq -> Gemini)
-- Modern Translucent Glassmorphism UI & Dark Aurora Gradient Canvas
+- Modern Obsidian-Teal & Champagne Glassmorphism UI
 - Multi-Tab Workspace: 💬 AI Data Chat + 🧹 Data Profiler & Preprocessing + 🧪 Evaluation
 - Automated Data Health Scoring (0-100) & Column Diagnostics
 - Reversible Interactive Preprocessing Pipeline with Audit Trail
@@ -13,6 +13,7 @@ Upgraded with:
 - Dynamic Fuzzy Column Matching (difflib) & Structured Decline Handling
 """
 
+import html
 import io
 import os
 import re
@@ -26,6 +27,8 @@ matplotlib.use("Agg")  # Non-interactive backend safe for server/Streamlit usage
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 import plotly.io as pio
 import seaborn as sns
 import streamlit as st
@@ -102,7 +105,7 @@ def get_available_routes(env_dict: Optional[Dict[str, str]] = None) -> List[Dict
     """
     Inspects environment variables and constructs the prioritized list of LLM routes.
     Order of preference:
-      1. Groq (primary: openai/gpt-oss-20b, fallback: openai/gpt-oss-120b)
+      1. Groq (primary: openai/gpt-oss-120b, fallback: openai/gpt-oss-20b)
       2. Google Gemini (primary: gemini-4-hydrogen, fallback: gemini-flash-latest)
     Does NOT mutate global os.environ.
     """
@@ -113,10 +116,10 @@ def get_available_routes(env_dict: Optional[Dict[str, str]] = None) -> List[Dict
     if groq_key:
         routes.append({
             "provider": "Groq",
-            "primary_model": "openai/gpt-oss-20b",
-            "fallback_model": "openai/gpt-oss-120b",
+            "primary_model": "openai/gpt-oss-120b",
+            "fallback_model": "openai/gpt-oss-20b",
             "api_key": groq_key,
-            "label": "Groq (gpt-oss-20b)",
+            "label": "Groq (gpt-oss-120b)",
         })
 
     gemini_key = (env.get("GEMINI_API_KEY") or env.get("GOOGLE_API_KEY") or "").strip().strip("'\"")
@@ -162,6 +165,13 @@ def _build_gemini_generate_config(
     return types.GenerateContentConfig(**config_options)
 
 
+def _build_gemini_http_options(types: Any, model_name: str) -> Any:
+    options: Dict[str, Any] = {"timeout": 25_000}
+    if "-latest" in model_name:
+        options["api_version"] = "v1beta"
+    return types.HttpOptions(**options)
+
+
 def call_llm_code_generator_single(
     prompt: str,
     df_schema: str,
@@ -194,17 +204,18 @@ Never access runtime system modules or attributes (such as plt.sys or df.eval or
 SYNTAX & FORMATTING RULES:
 1. Refer to the dataset exclusively as `df`. Do NOT redefine `df` or reload files.
 2. ALWAYS use bracket access `df['column']` for columns, never `.format()` or dynamic string evaluations. Use f-strings for string interpolation.
-3. If computing a single value, list, or text, store it in variable `result` or print it.
-4. If returning a subset, grouped table, or aggregated view, store it in variable `result_df` (a pandas DataFrame).
-5. For bar, scatter, histogram, box, and heatmap requests, prefer interactive Plotly Express charts assigned to `result_fig` (use the pre-injected `px` and `go` names).
+3. For text columns, use `df.select_dtypes(include=['object', 'string', 'category'])` so Pandas 3 StringDtype columns are included.
+4. If computing a single value, list, or text, store it in variable `result` or print it.
+5. If returning a subset, grouped table, or aggregated view, store it in variable `result_df` (a pandas DataFrame).
+6. For bar, scatter, histogram, box, and heatmap requests, prefer interactive Plotly Express charts assigned to `result_fig` (use the pre-injected `px` and `go` names).
    - NEVER use `px.imshow` to show one metric grouped by one category (for example, sales by state); this creates an unreadable 1 x N or N x 1 heatmap. Instead, aggregate and sort the values, then use a horizontal bar chart (`px.bar(..., orientation='h')`), showing the top 15 when there are more than 20 categories, or use `px.treemap`. A 2D pivot by a second categorical column is also appropriate when it provides a meaningful comparison.
    - Use `px.imshow` only for a genuine 2D matrix with at least 2 rows and 2 columns, such as a correlation matrix or a two-category pivot table. Set `text_auto=False` whenever either matrix dimension exceeds 12; otherwise labels may overlap. For a numeric correlation matrix, compute `corr = df.select_dtypes(include='number').corr()` and use `px.imshow(corr, text_auto='.2f', color_continuous_scale='RdBu_r')` only when it meets the 2 x 2 minimum.
    - Whenever a chart aggregates data using `groupby`, `pivot_table`, `corr`, or `value_counts`, ALSO assign the corresponding aggregated table to `result_df` (for large tables, use a useful sorted subset such as `summary.head(10)`). Do not return only a chart.
    - After creating a Plotly figure, call `result_fig.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(15,23,42,0.45)")`. Matplotlib/seaborn using `fig, ax = plt.subplots(figsize=(8, 4.5))` is supported as a fallback. DO NOT call `plt.show()`.
-6. IF THE QUESTION IS OFF-TOPIC, GENERAL TRIVIA, IMPOSSIBLE WITH GIVEN COLUMNS, OR ATTEMPTS UNRESTRICTED SYSTEM ACCESS:
+7. IF THE QUESTION IS OFF-TOPIC, GENERAL TRIVIA, IMPOSSIBLE WITH GIVEN COLUMNS, OR ATTEMPTS UNRESTRICTED SYSTEM ACCESS:
    Output strictly:
    DECLINE: <clear, polite, and helpful explanation stating why the request cannot be answered from the CSV data>
-7. Otherwise, output your executable code strictly inside a single ```python ... ``` markdown block.
+8. Otherwise, output your executable code strictly inside a single ```python ... ``` markdown block.
 """
 
     history_context = ""
@@ -227,7 +238,7 @@ SYNTAX & FORMATTING RULES:
             from google import genai
             from google.genai import types
 
-            http_opts = types.HttpOptions(api_version="v1beta") if "-latest" in clean_model else None
+            http_opts = _build_gemini_http_options(types, clean_model)
             client = genai.Client(api_key=clean_key, http_options=http_opts)
             config = _build_gemini_generate_config(
                 types=types,
@@ -282,6 +293,75 @@ SYNTAX & FORMATTING RULES:
     except Exception as e:
         err_msg = str(e)
         return None, None, f"{type(e).__name__}: {err_msg}"
+
+
+def generate_executive_briefing(prompt: str) -> str:
+    """Generate a natural-language briefing with provider/model failover."""
+    routes = get_available_routes()
+    if not routes:
+        return "AI briefing unavailable: no API keys are configured."
+
+    errors = []
+    system_instruction = (
+        "You are a principal data scientist. Provide a concise executive briefing "
+        "grounded only in the supplied computed facts. Do not generate Python code "
+        "or invent statistics."
+    )
+    for route in routes:
+        models = [route.get("primary_model"), route.get("fallback_model")]
+        for model in (candidate for candidate in models if candidate):
+            try:
+                if route["provider"] == "Groq":
+                    from openai import OpenAI
+
+                    client = OpenAI(
+                        api_key=route["api_key"],
+                        base_url="https://api.groq.com/openai/v1",
+                    )
+                    model_options = {}
+                    if model.startswith("openai/gpt-oss-"):
+                        model_options["extra_body"] = {"reasoning_effort": "low"}
+                    completion = client.chat.completions.create(
+                        model=model,
+                        temperature=0.2,
+                        max_tokens=500,
+                        messages=[
+                            {"role": "system", "content": system_instruction},
+                            {"role": "user", "content": prompt},
+                        ],
+                        **model_options,
+                    )
+                    briefing = completion.choices[0].message.content or ""
+                elif route["provider"] == "Google Gemini":
+                    from google import genai
+                    from google.genai import types
+
+                    client = genai.Client(
+                        api_key=route["api_key"],
+                        http_options=_build_gemini_http_options(types, model),
+                    )
+                    response = client.models.generate_content(
+                        model=model,
+                        contents=prompt,
+                        config=_build_gemini_generate_config(
+                            types=types,
+                            model_name=model,
+                            temperature=0.2,
+                            system_instruction=system_instruction,
+                        ),
+                    )
+                    briefing = response.text or ""
+                else:
+                    errors.append(f"Unsupported provider: {route['provider']}")
+                    continue
+
+                if briefing.strip():
+                    return briefing.strip()
+                errors.append(f"{route['provider']} ({model}) returned an empty briefing")
+            except Exception as ex:
+                errors.append(f"{route['provider']} ({model}): {type(ex).__name__}: {ex}")
+
+    return "AI briefing unavailable after provider failover. " + " | ".join(errors)
 
 
 def execute_query_pipeline(
@@ -453,54 +533,60 @@ ACTUAL COMPUTED RESULTS:
 
 Instructions:
 Provide a concise, friendly, plain-English summary (1-3 sentences) directly answering the user's question.
-Cite the exact computed numbers or findings from the ACTUAL COMPUTED RESULTS above.
-For chart queries, explain the actual data insights (such as top categories, comparisons, or correlations) using the verified result table; do not describe the Python code or implementation instead of the findings.
+Cite verified numeric findings from `result` and/or `result_df` in the ACTUAL COMPUTED RESULTS above.
+For chart queries, explain the actual data insights (such as top categories, comparisons, or correlations) using the verified result table. Never summarize the Python implementation steps or describe "what the code does" instead of reporting data findings.
 Do NOT guess, extrapolate, or invent any numbers not present in the results.
 """
 
     routes = get_available_routes()
     for route in routes:
         clean_key = route["api_key"]
-        model = route["primary_model"]
-        try:
-            if route["provider"] == "Groq":
-                from openai import OpenAI
+        if route["provider"] == "Groq":
+            models = [route.get("fallback_model"), route.get("primary_model")]
+        else:
+            models = [route.get("primary_model"), route.get("fallback_model")]
+        for model in (candidate for candidate in models if candidate):
+            try:
+                if route["provider"] == "Groq":
+                    from openai import OpenAI
 
-                client = OpenAI(api_key=clean_key, base_url="https://api.groq.com/openai/v1")
-                model_options = {}
-                if model.startswith("openai/gpt-oss-"):
-                    model_options["extra_body"] = {"reasoning_effort": "low"}
-                completion = client.chat.completions.create(
-                    model=model,
-                    temperature=0.2,
-                    messages=[{"role": "user", "content": summary_prompt}],
-                    max_tokens=250,
-                    **model_options,
-                )
-                grounded_text = completion.choices[0].message.content or ""
-                if grounded_text.strip():
-                    return grounded_text.strip()
-
-            elif route["provider"] == "Google Gemini":
-                from google import genai
-                from google.genai import types
-
-                http_opts = types.HttpOptions(api_version="v1beta") if "-latest" in model else None
-                client = genai.Client(api_key=clean_key, http_options=http_opts)
-                response = client.models.generate_content(
-                    model=model,
-                    contents=summary_prompt,
-                    config=_build_gemini_generate_config(
-                        types=types,
-                        model_name=model,
+                    client = OpenAI(api_key=clean_key, base_url="https://api.groq.com/openai/v1")
+                    model_options = {}
+                    if model.startswith("openai/gpt-oss-"):
+                        model_options["extra_body"] = {"reasoning_effort": "low"}
+                    completion = client.chat.completions.create(
+                        model=model,
                         temperature=0.2,
-                    ),
-                )
-                grounded_text = response.text or ""
-                if grounded_text.strip():
-                    return grounded_text.strip()
-        except Exception:
-            continue
+                        messages=[{"role": "user", "content": summary_prompt}],
+                        max_tokens=250,
+                        **model_options,
+                    )
+                    grounded_text = completion.choices[0].message.content or ""
+                    if grounded_text.strip():
+                        return grounded_text.strip()
+
+                elif route["provider"] == "Google Gemini":
+                    from google import genai
+                    from google.genai import types
+
+                    client = genai.Client(
+                        api_key=clean_key,
+                        http_options=_build_gemini_http_options(types, model),
+                    )
+                    response = client.models.generate_content(
+                        model=model,
+                        contents=summary_prompt,
+                        config=_build_gemini_generate_config(
+                            types=types,
+                            model_name=model,
+                            temperature=0.2,
+                        ),
+                    )
+                    grounded_text = response.text or ""
+                    if grounded_text.strip():
+                        return grounded_text.strip()
+            except Exception:
+                continue
 
     # Fast-path deterministic fallback if all summarizer LLM calls fail
     if result_val is not None:
@@ -551,6 +637,105 @@ def render_plotly_chart(
     )
 
 
+def build_column_sparkline(df: pd.DataFrame) -> str:
+    """Build a compact completeness sparkline using only inline SVG."""
+    completeness = df.notna().mean().fillna(0).tolist() if len(df.columns) else []
+    if not completeness:
+        return '<svg viewBox="0 0 180 44" style="width:100%;height:auto;max-height:54px" role="img" aria-label="No columns"><text x="4" y="25" fill="#9aa9a5" font-size="12">No column data</text></svg>'
+
+    width = max(180, min(440, len(completeness) * 12))
+    step = (width - 12) / max(len(completeness) - 1, 1)
+    dots = []
+    for index, value in enumerate(completeness):
+        x = 6 + index * step
+        y = 38 - float(value) * 30
+        color = "#34d399" if value >= 0.9 else "#e0bd79"
+        dots.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3.1" fill="{color}" />')
+    return (
+        f'<svg viewBox="0 0 {width} 44" style="width:100%;height:auto;max-height:54px" role="img" aria-label="Column completeness">'
+        f'{"".join(dots)}</svg>'
+    )
+
+
+def build_dataset_overview_figure(df: pd.DataFrame) -> go.Figure:
+    """Build a correlation heatmap or compact column-quality overview."""
+    numeric_df = df.select_dtypes(include="number")
+    if len(df) >= 2 and numeric_df.shape[1] >= 2:
+        selected_columns = numeric_df.columns[:8]
+        correlation = numeric_df.loc[:, selected_columns].corr()
+        figure = px.imshow(
+            correlation,
+            text_auto=".2f",
+            aspect="auto",
+            color_continuous_scale=["#34d399", "#0b1514", "#e0bd79"],
+            zmin=-1,
+            zmax=1,
+            labels={"x": "Feature", "y": "Feature", "color": "r"},
+            title="Numeric Feature Correlations",
+        )
+        figure.update_xaxes(tickangle=-35, side="bottom", title=None)
+        figure.update_yaxes(title=None)
+        figure.update_layout(
+            template="plotly_dark",
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(11,21,20,0.45)",
+            height=390,
+            margin={"l": 55, "r": 24, "t": 58, "b": 100},
+        )
+        return figure
+
+    column_counts = pd.DataFrame({
+        "Column": [str(column) for column in df.columns],
+        "Non-null count": [int(df[column].notna().sum()) for column in df.columns],
+        "Unique values": [int(df[column].nunique(dropna=True)) for column in df.columns],
+    })
+    count_data = column_counts.melt(
+        id_vars="Column",
+        var_name="Measure",
+        value_name="Count",
+    )
+    figure = px.bar(
+        count_data,
+        x="Count",
+        y="Column",
+        color="Measure",
+        barmode="group",
+        orientation="h",
+        text_auto=True,
+        color_discrete_map={
+            "Non-null count": "#34d399",
+            "Unique values": "#e0bd79",
+        },
+        title="Column Completeness & Cardinality",
+    )
+    figure.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(11,21,20,0.45)",
+        height=max(300, min(520, 80 + len(column_counts) * 32)),
+        margin={"l": 24, "r": 24, "t": 58, "b": 35},
+        legend_title_text="",
+    )
+    figure.update_xaxes(title=None, gridcolor="rgba(167,243,208,0.10)")
+    figure.update_yaxes(title=None, autorange="reversed")
+    return figure
+
+
+def _style_evaluation_figure(figure: go.Figure, height: int = 340) -> go.Figure:
+    figure.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(11,21,20,0.45)",
+        font={"color": "#f1f5f4"},
+        height=height,
+        margin={"l": 28, "r": 20, "t": 40, "b": 45},
+        legend_title_text="",
+    )
+    figure.update_xaxes(showgrid=False)
+    figure.update_yaxes(gridcolor="rgba(167,243,208,0.12)")
+    return figure
+
+
 # ==============================================================================
 # 6. Streamlit User Interface (Translucent Glassmorphism & Tabs)
 # ==============================================================================
@@ -572,69 +757,125 @@ def main():
         <style>
         @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap');
 
-        /* Dark Aurora Radial Mesh Canvas */
+        :root {
+            --obsidian: #050908;
+            --glass: rgba(11, 21, 20, 0.72);
+            --glass-border: rgba(167, 243, 208, 0.11);
+            --champagne: #e0bd79;
+            --mint: #34d399;
+            --text-main: #f1f5f4;
+            --text-muted: #9aa9a5;
+        }
+
         .stApp {
-            background-color: #070b14;
-            background-image: 
-                radial-gradient(circle at 12% 12%, rgba(99, 102, 241, 0.12) 0%, transparent 40%),
-                radial-gradient(circle at 88% 18%, rgba(168, 85, 247, 0.10) 0%, transparent 42%),
-                radial-gradient(circle at 50% 88%, rgba(6, 182, 212, 0.08) 0%, transparent 45%);
+            background-color: var(--obsidian);
+            background-image:
+                radial-gradient(circle at 12% 12%, rgba(16, 85, 72, 0.22) 0%, transparent 38%),
+                radial-gradient(circle at 88% 88%, rgba(224, 189, 121, 0.08) 0%, transparent 36%),
+                radial-gradient(circle at 52% 48%, rgba(20, 60, 55, 0.18) 0%, transparent 48%);
             background-attachment: fixed;
-            font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
-            color: #f1f5f9;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            color: var(--text-main);
+        }
+        [data-testid="stAppViewContainer"] {
+            background: transparent;
+        }
+        [data-testid="stHeader"] {
+            background: rgba(5, 9, 8, 0.78);
+            backdrop-filter: blur(18px);
+        }
+        .block-container {
+            padding-top: 1.2rem;
+            padding-bottom: 2rem;
         }
 
-        /* Sidebar Styling (Frosted Glass) */
         [data-testid="stSidebar"] {
-            background-color: rgba(15, 23, 42, 0.70) !important;
-            backdrop-filter: blur(20px) !important;
-            -webkit-backdrop-filter: blur(20px) !important;
-            border-right: 1px solid rgba(255, 255, 255, 0.07) !important;
+            background: rgba(7, 16, 14, 0.94) !important;
+            backdrop-filter: blur(22px) !important;
+            -webkit-backdrop-filter: blur(22px) !important;
+            border-right: 1px solid rgba(167, 243, 208, 0.11) !important;
         }
 
-        /* Header Hero Container */
         .hero-container {
-            padding: 1.2rem 1.6rem;
-            border-radius: 16px;
-            background: rgba(15, 23, 42, 0.60);
-            backdrop-filter: blur(16px);
-            -webkit-backdrop-filter: blur(16px);
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.36);
-            margin-bottom: 1.2rem;
+            padding: 0.85rem 1.15rem;
+            border-radius: 18px;
+            background: rgba(11, 21, 20, 0.82);
+            backdrop-filter: blur(22px) saturate(140%);
+            -webkit-backdrop-filter: blur(22px) saturate(140%);
+            border: 1px solid rgba(167, 243, 208, 0.14);
+            box-shadow: 0 18px 45px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.06);
+            margin-bottom: 0.8rem;
             display: flex;
             align-items: center;
             justify-content: space-between;
+            gap: 1rem;
+        }
+        .hero-brand {
+            display: flex;
+            align-items: center;
+            gap: 0.8rem;
+        }
+        .brand-mark {
+            width: 42px;
+            height: 42px;
+            display: grid;
+            place-items: center;
+            border-radius: 14px;
+            color: #fff4d8;
+            font-size: 1.35rem;
+            background: linear-gradient(145deg, rgba(224,189,121,0.28), rgba(52,211,153,0.14));
+            border: 1px solid rgba(224,189,121,0.42);
+            box-shadow: 0 0 22px rgba(224,189,121,0.12);
+        }
+        .hero-meta {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            flex-wrap: wrap;
+            gap: 0.65rem;
         }
         .hero-title {
-            font-size: 2.1rem;
+            font-size: 1.25rem !important;
+            line-height: 1.2;
             font-weight: 700;
-            background: linear-gradient(135deg, #a5b4fc 0%, #c084fc 50%, #38bdf8 100%);
+            background: linear-gradient(110deg, #fff4d8 0%, #e0bd79 55%, #a9e3ce 100%);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             margin: 0;
-            padding-bottom: 0.2rem;
+            padding-bottom: 0.1rem;
         }
         .hero-subtitle {
-            color: #94a3b8;
-            font-size: 0.95rem;
+            color: var(--text-muted);
+            font-size: 0.72rem;
             margin: 0;
             font-weight: 400;
         }
-
-        /* Backend Engine Status Pill */
+        .dataset-pill {
+            display: inline-flex;
+            align-items: center;
+            max-width: 290px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            padding: 0.38rem 0.75rem;
+            border-radius: 999px;
+            background: rgba(255,255,255,0.035);
+            border: 1px solid rgba(167,243,208,0.13);
+            color: #c4d2cd;
+            font-size: 0.76rem;
+        }
         .status-pill {
             display: inline-flex;
             align-items: center;
             gap: 6px;
-            padding: 0.4rem 0.9rem;
+            padding: 0.4rem 0.8rem;
             border-radius: 9999px;
-            font-size: 0.8rem;
+            font-size: 0.74rem;
             font-weight: 600;
-            background: rgba(16, 185, 129, 0.12);
-            color: #34d399;
-            border: 1px solid rgba(52, 211, 153, 0.3);
-            box-shadow: 0 0 12px rgba(16, 185, 129, 0.15);
+            background: rgba(52, 211, 153, 0.10);
+            color: var(--mint);
+            border: 1px solid rgba(52, 211, 153, 0.28);
+            box-shadow: 0 0 16px rgba(52, 211, 153, 0.10);
         }
         .status-pill-alert {
             display: inline-flex;
@@ -644,120 +885,208 @@ def main():
             border-radius: 9999px;
             font-size: 0.8rem;
             font-weight: 600;
-            background: rgba(239, 68, 68, 0.12);
-            color: #f87171;
-            border: 1px solid rgba(248, 113, 113, 0.3);
+            background: rgba(224, 189, 121, 0.10);
+            color: var(--champagne);
+            border: 1px solid rgba(224, 189, 121, 0.34);
         }
 
-        /* 4 Glassmorphism KPI Metric Cards */
         .kpi-card {
-            background: rgba(30, 41, 59, 0.50);
-            backdrop-filter: blur(12px);
-            -webkit-backdrop-filter: blur(12px);
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            border-radius: 12px;
-            padding: 0.9rem 1.1rem;
-            margin-bottom: 0.8rem;
-            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+            background: rgba(11, 21, 20, 0.72);
+            backdrop-filter: blur(22px) saturate(140%);
+            -webkit-backdrop-filter: blur(22px) saturate(140%);
+            border: 1px solid rgba(167, 243, 208, 0.11);
+            border-radius: 18px;
+            padding: 0.78rem 0.9rem;
+            margin-bottom: 0.55rem;
+            box-shadow: 0 18px 45px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.06);
             transition: transform 0.2s ease, border-color 0.2s ease;
+        }
+        .evaluation-kpi-card {
+            min-height: 128px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        }
+        .evaluation-kpi-caption {
+            color: #9aa9a5;
+            font-size: 0.58rem;
+            line-height: 1.2;
+            margin-top: 0.45rem;
+            white-space: normal;
         }
         .kpi-card:hover {
             transform: translateY(-2px);
-            border-color: rgba(129, 140, 248, 0.35);
+            border-color: rgba(224, 189, 121, 0.45);
+            box-shadow: 0 0 22px rgba(224,189,121,0.10), 0 18px 45px rgba(0,0,0,0.42);
         }
         .kpi-label {
-            font-size: 0.78rem;
+            font-size: 0.68rem;
             font-weight: 600;
             text-transform: uppercase;
-            letter-spacing: 0.05em;
-            color: #94a3b8;
+            letter-spacing: 0.08em;
+            color: #9eada8;
             margin-bottom: 0.2rem;
         }
         .kpi-value {
-            font-size: 1.45rem;
+            font-size: 1.25rem;
             font-weight: 700;
-            color: #f8fafc;
+            color: #f1f5f4;
         }
-
-        /* Chat Message Bubbles */
-        .chat-bubble-user {
-            background: rgba(99, 102, 241, 0.15);
-            border: 1px solid rgba(129, 140, 248, 0.3);
-            border-radius: 14px 14px 2px 14px;
-            padding: 0.9rem 1.2rem;
-            margin: 0.5rem 0;
-            color: #f1f5f9;
+        .metric-tile .kpi-label {
+            font-size: 0.58rem;
+            letter-spacing: 0.04em;
         }
-        .chat-bubble-assistant {
-            background: rgba(15, 23, 42, 0.65);
-            backdrop-filter: blur(12px);
-            -webkit-backdrop-filter: blur(12px);
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            border-radius: 14px 14px 14px 2px;
-            padding: 0.9rem 1.2rem;
-            margin: 0.5rem 0;
-            color: #e2e8f0;
+        .metric-tile .kpi-value {
+            font-size: 1.05rem;
         }
-
-        /* Frosted native Streamlit alerts and bordered commentary panels */
+        .metric-tile {
+            min-height: 82px;
+            padding: 0.75rem;
+            border-radius: 14px;
+            background: rgba(5, 9, 8, 0.42);
+            border: 1px solid rgba(167,243,208,0.13);
+        }
+        .panel-heading {
+            color: #f5e5c1;
+            font-size: 0.92rem;
+            font-weight: 650;
+            margin: 0.15rem 0 0.65rem;
+        }
         [data-testid="stAlert"] {
-            background: rgba(30, 41, 59, 0.72);
-            backdrop-filter: blur(10px);
-            -webkit-backdrop-filter: blur(10px);
-            border: 1px solid rgba(255, 255, 255, 0.12);
-            border-radius: 12px;
+            background: rgba(11, 21, 20, 0.84);
+            backdrop-filter: blur(16px);
+            border: 1px solid rgba(224, 189, 121, 0.22);
+            border-radius: 16px;
         }
         [data-testid="stVerticalBlockBorderWrapper"] {
-            background: rgba(15, 23, 42, 0.45);
-            backdrop-filter: blur(12px);
-            -webkit-backdrop-filter: blur(12px);
-            border-color: rgba(255, 255, 255, 0.12);
-            border-radius: 14px;
+            background: rgba(11, 21, 20, 0.72);
+            backdrop-filter: blur(22px) saturate(140%);
+            -webkit-backdrop-filter: blur(22px) saturate(140%);
+            border: 1px solid rgba(167, 243, 208, 0.11);
+            border-radius: 18px;
+            box-shadow: 0 18px 45px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.06);
+            transition: border-color 0.2s ease, box-shadow 0.2s ease;
         }
-
-        /* Empty State */
+        [data-testid="stVerticalBlockBorderWrapper"]:hover {
+            border-color: rgba(224, 189, 121, 0.45);
+            box-shadow: 0 0 20px rgba(224,189,121,0.08), 0 18px 45px rgba(0,0,0,0.45);
+        }
         .empty-state {
-            padding: 3rem 1.5rem;
-            border-radius: 16px;
-            border: 1px dashed rgba(255, 255, 255, 0.15);
-            background: rgba(15, 23, 42, 0.40);
-            backdrop-filter: blur(12px);
+            padding: 2.2rem 1.5rem;
+            border-radius: 18px;
+            border: 1px dashed rgba(167, 243, 208, 0.20);
+            background: rgba(11, 21, 20, 0.48);
+            backdrop-filter: blur(18px);
             text-align: center;
-            margin: 1.5rem 0;
+            margin: 1rem 0;
         }
-
-        /* Route Tag */
         .route-tag {
             font-size: 0.72rem;
             font-weight: 600;
-            color: #818cf8;
+            color: var(--champagne);
             padding: 0.15rem 0.5rem;
-            border-radius: 6px;
-            background: rgba(99, 102, 241, 0.15);
-            border: 1px solid rgba(99, 102, 241, 0.25);
+            border-radius: 999px;
+            background: rgba(224, 189, 121, 0.10);
+            border: 1px solid rgba(224, 189, 121, 0.25);
             display: inline-block;
             margin-top: 0.4rem;
         }
-
-        /* Custom Tabs Styling */
         .stTabs [data-baseweb="tab-list"] {
-            gap: 8px;
-            background-color: rgba(15, 23, 42, 0.45);
-            padding: 6px;
-            border-radius: 12px;
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            margin-bottom: 1rem;
+            gap: 5px;
+            background: rgba(11, 21, 20, 0.72);
+            padding: 5px;
+            border-radius: 15px;
+            border: 1px solid rgba(167, 243, 208, 0.11);
+            margin-bottom: 0.8rem;
+            box-shadow: 0 10px 24px rgba(0,0,0,0.25);
         }
         .stTabs [data-baseweb="tab"] {
-            border-radius: 8px;
-            color: #94a3b8;
-            padding: 8px 18px;
+            border-radius: 11px;
+            color: #a7b3af;
+            padding: 8px 14px;
             font-weight: 600;
+            transition: all 0.2s ease;
         }
         .stTabs [aria-selected="true"] {
-            background-color: rgba(99, 102, 241, 0.25) !important;
-            color: #f1f5f9 !important;
-            border: 1px solid rgba(129, 140, 248, 0.4) !important;
+            background: rgba(224, 189, 121, 0.12) !important;
+            color: #fff4d8 !important;
+            border: 1px solid rgba(224, 189, 121, 0.45) !important;
+            box-shadow: 0 0 16px rgba(224, 189, 121, 0.12);
+        }
+        .stTabs [data-baseweb="tab"]:hover {
+            color: #f3dfb2;
+        }
+        [data-testid="stRadio"] [role="radiogroup"] {
+            gap: 0.35rem;
+            flex-wrap: wrap;
+        }
+        [data-testid="stRadio"] label[data-baseweb="radio"] {
+            border: 1px solid rgba(167,243,208,0.12);
+            border-radius: 999px;
+            padding: 0.32rem 0.65rem;
+            background: rgba(5,9,8,0.4);
+        }
+        [data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) {
+            border-color: rgba(224,189,121,0.48);
+            background: rgba(224,189,121,0.10);
+        }
+        .stButton > button, .stDownloadButton > button {
+            border-radius: 999px;
+            border: 1px solid rgba(167, 243, 208, 0.16);
+            background: rgba(11, 21, 20, 0.86);
+            color: #e9f1ed;
+            transition: all 0.2s ease;
+        }
+        .stButton > button:hover, .stDownloadButton > button:hover {
+            border-color: rgba(224, 189, 121, 0.55);
+            color: #fff4d8;
+            box-shadow: 0 0 18px rgba(224, 189, 121, 0.13);
+        }
+        [data-testid="stChatInput"] {
+            border: 1px solid rgba(224, 189, 121, 0.38);
+            border-radius: 999px;
+            background: rgba(11, 21, 20, 0.92);
+            box-shadow: none;
+            overflow: hidden;
+        }
+        [data-testid="stChatInput"] > div {
+            border: 0 !important;
+            border-radius: inherit !important;
+            background: transparent !important;
+            box-shadow: none !important;
+        }
+        [data-testid="stChatInput"] [data-testid="stChatInputTextArea"] {
+            border: 0 !important;
+            border-radius: inherit !important;
+            background: transparent !important;
+        }
+        [data-testid="stChatInput"] textarea {
+            color: #f1f5f4;
+        }
+        [data-testid="stChatMessage"] {
+            background: rgba(11, 21, 20, 0.45);
+            border: 1px solid rgba(167, 243, 208, 0.08);
+            border-radius: 15px;
+            padding: 0.7rem 0.85rem;
+            margin-bottom: 0.55rem;
+        }
+        [data-testid="stExpander"] {
+            border-color: rgba(167, 243, 208, 0.12);
+            border-radius: 13px;
+        }
+        [data-testid="stDataFrame"], [data-testid="stTable"] {
+            border: 1px solid rgba(167, 243, 208, 0.11);
+            border-radius: 12px;
+            overflow: hidden;
+        }
+        [data-testid="stElementToolbar"] {
+            background: rgba(11, 21, 20, 0.92);
+            border: 1px solid rgba(224, 189, 121, 0.35);
+            color: #f1f5f4;
+        }
+        @media (max-width: 900px) {
+            .hero-container { align-items: flex-start; flex-direction: column; }
+            .hero-meta { justify-content: flex-start; }
         }
         </style>
         """,
@@ -777,12 +1106,23 @@ def main():
         st.session_state.df_name = ""
     if "data_source" not in st.session_state:
         st.session_state.data_source = ""
-    if "last_uploaded_file_id" not in st.session_state:
-        st.session_state.last_uploaded_file_id = None
+    if "last_uploaded_file_signature" not in st.session_state:
+        st.session_state.last_uploaded_file_signature = None
+    if "visual_stage_mode_v2" not in st.session_state:
+        st.session_state.visual_stage_mode_v2 = "📋 Dataset Overview"
     if "pending_prompt" not in st.session_state:
         st.session_state.pending_prompt = None
     if "evaluation_result" not in st.session_state:
         st.session_state.evaluation_result = None
+    if "eval_table_rev" not in st.session_state:
+        st.session_state.eval_table_rev = 0
+    if "offline_security_metrics" not in st.session_state:
+        st.session_state.offline_security_metrics = {}
+    if "live_benchmark_metrics" not in st.session_state:
+        st.session_state.live_benchmark_metrics = {}
+    pending_visual_mode = st.session_state.pop("pending_visual_stage_mode_v2", None)
+    if pending_visual_mode:
+        st.session_state.visual_stage_mode_v2 = pending_visual_mode
 
     # Discover active AI backend routes from .env
     active_routes = get_available_routes()
@@ -802,6 +1142,10 @@ def main():
             type=["csv"],
             help="Upload any tabular CSV file to query in natural language.",
         )
+        uploaded_file_signature = None
+        if uploaded_file is not None:
+            upload_file_id = getattr(uploaded_file, "file_id", None) or uploaded_file.name
+            uploaded_file_signature = (upload_file_id, uploaded_file.size)
 
         demo_path = os.path.join(os.path.dirname(__file__), "data.csv")
         if os.path.exists(demo_path):
@@ -816,28 +1160,40 @@ def main():
                 st.session_state.preprocessing_logs = []
                 st.session_state.messages = []
                 st.session_state["ai_eda_insight"] = None
+                st.session_state.last_uploaded_file_signature = uploaded_file_signature
+                st.session_state.visual_stage_mode_v2 = "📋 Dataset Overview"
                 st.toast("Loaded Spotify sample dataset!", icon="✅")
 
         # Handle uploaded CSV without overwriting sample dataset on subsequent rerun
-        if uploaded_file is not None:
-            file_id = getattr(uploaded_file, "file_id", uploaded_file.name)
-            if st.session_state.last_uploaded_file_id != file_id or st.session_state.data_source == "upload":
-                if st.session_state.df_name != uploaded_file.name:
-                    file_bytes = uploaded_file.getvalue()
-                    loaded_df = load_csv_data_cached(file_bytes, uploaded_file.name)
-                    st.session_state.raw_df = loaded_df.copy()
-                    st.session_state.df = loaded_df.copy()
-                    st.session_state.df_name = uploaded_file.name
-                    st.session_state.data_source = "upload"
-                    st.session_state.last_uploaded_file_id = file_id
-                    st.session_state.preprocessing_logs = []
-                    st.session_state.messages = []
-                    st.session_state["ai_eda_insight"] = None
-                    st.toast(f"Loaded {uploaded_file.name}", icon="📁")
+        if (
+            uploaded_file is not None
+            and uploaded_file_signature != st.session_state.last_uploaded_file_signature
+        ):
+            try:
+                file_bytes = uploaded_file.getvalue()
+                loaded_df = load_csv_data_cached(file_bytes, uploaded_file.name)
+            except Exception as e:
+                st.error(f"Could not load CSV: {e}")
+            else:
+                st.session_state.raw_df = loaded_df.copy()
+                st.session_state.df = loaded_df.copy()
+                st.session_state.df_name = uploaded_file.name
+                st.session_state.data_source = "upload"
+                st.session_state.last_uploaded_file_signature = uploaded_file_signature
+                st.session_state.preprocessing_logs = []
+                st.session_state.messages = []
+                st.session_state["ai_eda_insight"] = None
+                st.session_state.visual_stage_mode_v2 = "📋 Dataset Overview"
+                st.toast(f"Loaded {uploaded_file.name}", icon="📁")
 
         # Keep raw_df synchronized if not yet set
         if st.session_state.df is not None and st.session_state.raw_df is None:
             st.session_state.raw_df = st.session_state.df.copy()
+        profile = (
+            compute_data_profile(st.session_state.df)
+            if st.session_state.df is not None
+            else None
+        )
 
         st.divider()
 
@@ -871,17 +1227,17 @@ def main():
         show_code = st.checkbox("Show generated Python code", value=True)
         if st.button("🗑️ Clear Conversation", **width_kwargs):
             st.session_state.messages = []
+            st.session_state.visual_stage_mode_v2 = "📋 Dataset Overview"
             st.rerun()
 
         # 4. Session Report Export (.md)
         if st.session_state.df is not None:
             st.divider()
             st.markdown("#### 📄 Session Report")
-            profile_for_rep = compute_data_profile(st.session_state.df)
             report_md_str = export_session_report_markdown(
                 df_name=st.session_state.df_name,
                 df=st.session_state.df,
-                profile=profile_for_rep,
+                profile=profile,
                 preprocessing_logs=st.session_state.preprocessing_logs,
                 messages=st.session_state.messages,
             )
@@ -895,21 +1251,30 @@ def main():
                 **width_kwargs,
             )
 
-    # --- Main Hero Header ---
+    # --- Compact Glass Command Bar ---
+    display_routes = [
+        "Gemini" if route["provider"] == "Google Gemini" else route["provider"]
+        for route in active_routes
+    ]
     status_html = (
-        f'<span class="status-pill">● {" + ".join(route_labels)} Active</span>'
+        f'<span class="status-pill">● {html.escape(" + ".join(display_routes))} Active</span>'
         if has_active_engine
-        else '<span class="status-pill-alert">⚠️ Set keys in .env</span>'
+        else '<span class="status-pill-alert">⚠️ AI keys not configured</span>'
     )
+    dataset_label = html.escape(st.session_state.df_name or "No dataset loaded")
 
     st.markdown(
         f"""
         <div class="hero-container">
-            <div>
-                <h1 class="hero-title">Chat-with-your-CSV</h1>
-                <p class="hero-subtitle">Zero-Trust Tabular Intelligence • Sandboxed Execution • Grounded Answers</p>
+            <div class="hero-brand">
+                <span class="brand-mark">✦</span>
+                <div>
+                    <h1 class="hero-title">Chat-with-your-CSV</h1>
+                    <p class="hero-subtitle">NATURAL LANGUAGE ANALYTICS · GROUNDED AI</p>
+                </div>
             </div>
-            <div>
+            <div class="hero-meta">
+                <span class="dataset-pill">◈ {dataset_label}</span>
                 {status_html}
             </div>
         </div>
@@ -943,53 +1308,15 @@ def main():
                 st.session_state.data_source = "sample"
                 st.session_state.preprocessing_logs = []
                 st.session_state.messages = []
+                st.session_state["ai_eda_insight"] = None
+                st.session_state.last_uploaded_file_signature = uploaded_file_signature
+                st.session_state.visual_stage_mode_v2 = "📋 Dataset Overview"
                 st.rerun()
         st.stop()
         return
 
-    # --- State 2: Data Loaded - Display 4 Frosted Glass KPI Cards ---
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.markdown(
-            f"""
-            <div class="kpi-card">
-                <div class="kpi-label">Active Dataset</div>
-                <div class="kpi-value" style="font-size: 1.15rem; word-break: break-all;">{st.session_state.df_name}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    with col2:
-        st.markdown(
-            f"""
-            <div class="kpi-card">
-                <div class="kpi-label">Total Rows</div>
-                <div class="kpi-value">{df.shape[0]:,}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    with col3:
-        st.markdown(
-            f"""
-            <div class="kpi-card">
-                <div class="kpi-label">Columns</div>
-                <div class="kpi-value">{df.shape[1]:,}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    with col4:
-        missing_count = int(df.isnull().sum().sum())
-        st.markdown(
-            f"""
-            <div class="kpi-card">
-                <div class="kpi-label">Missing Cells</div>
-                <div class="kpi-value">{missing_count:,}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    # --- State 2: Data loaded ---
+    missing_count = int(df.isnull().sum().sum())
 
     # --- Multi-Tab Workspace ---
     tab_chat, tab_profiler, tab_eval = st.tabs([
@@ -1002,268 +1329,388 @@ def main():
     # TAB 1: AI Data Chat
     # ==========================================================================
     with tab_chat:
-        # Collapsible Data Inspector
-        with st.expander("🔍 Inspect Uploaded Data (Preview, Schema & Statistics)", expanded=False):
-            t_tab1, t_tab2, t_tab3 = st.tabs(["📋 Data Preview", "🏷️ Column Types & Nulls", "📊 Summary Statistics"])
+        col_left, col_right = st.columns([1.45, 1.0], gap="large")
+        latest_assistant_idx = next(
+            (
+                idx for idx in range(len(st.session_state.messages) - 1, -1, -1)
+                if st.session_state.messages[idx].get("role") == "assistant"
+            ),
+            None,
+        )
+        latest_assistant = (
+            st.session_state.messages[latest_assistant_idx]
+            if latest_assistant_idx is not None
+            else None
+        )
+        has_active_visual = bool(
+            latest_assistant and any(
+                latest_assistant.get(key) is not None
+                for key in ("plotly_json", "figure_png", "result_df", "result")
+            )
+        )
 
-            with t_tab1:
-                st.dataframe(df.head(10), **width_kwargs)
-
-            with t_tab2:
-                row_count = max(len(df), 1)  # Guard against 0-row DataFrames
-                col_summary = pd.DataFrame({
-                    "Column Name": df.columns,
-                    "Data Type": [str(t) for t in df.dtypes],
-                    "Non-Null Count": df.notnull().sum().values,
-                    "Null Count": df.isnull().sum().values,
-                    "Null Percentage (%)": ((df.isnull().sum() / row_count) * 100).round(2).values,
-                    "Unique Values": [df[c].nunique() for c in df.columns],
-                })
-                st.dataframe(col_summary, hide_index=True, **width_kwargs)
-
-            with t_tab3:
-                st.dataframe(df.describe(include="all").T, **width_kwargs)
-
-        # Suggested Prompts Chips
-        st.markdown("##### 💡 Suggested Questions:")
-        prompt_cols = st.columns(4)
-        suggestions = generate_suggested_prompts(df)
-        for i, suggestion in enumerate(suggestions):
-            with prompt_cols[i % len(prompt_cols)]:
-                if st.button(suggestion, key=f"sugg_{i}", **width_kwargs):
-                    st.session_state.pending_prompt = suggestion
-                    st.rerun()
-
-        st.divider()
-
-        # Render Message History
-        for idx, msg in enumerate(st.session_state.messages):
-            role = msg.get("role", "user")
-            with st.chat_message(role, avatar="🧑‍💻" if role == "user" else "🤖"):
-                status = msg.get("status", "success")
-
-                if status == "error":
-                    cat = msg.get("failure_category", "Error")
-                    st.error(f"⚠️ **{cat}**\n\n{msg.get('content', '')}")
-                elif status == "declined":
-                    st.warning(f"🛡️ **Request Declined**\n\n{msg.get('content', '')}")
-                else:
-                    st.markdown(msg.get("content", ""))
-
-                # Route badge
-                if msg.get("route_label"):
-                    st.markdown(f'<span class="route-tag">Engine: {msg["route_label"]}</span>', unsafe_allow_html=True)
-
-                # View Generated Python Query
-                if msg.get("code") and show_code:
-                    with st.expander("💻 View Generated Python / Pandas Query"):
-                        st.code(msg["code"], language="python")
-
-                # Console Output
-                if msg.get("stdout"):
-                    st.caption(f"Console Output:\n{msg['stdout']}")
-
-                # Result Value
-                if msg.get("result") is not None:
-                    st.write(msg["result"])
-
-                # Result DataFrame Table
-                if msg.get("result_df") is not None:
-                    st.dataframe(msg["result_df"], **width_kwargs)
-                    csv_data = msg["result_df"].to_csv(index=False).encode("utf-8")
-                    st.download_button(
-                        label="📥 Download Result Table as CSV",
-                        data=csv_data,
-                        file_name="query_result.csv",
-                        mime="text/csv",
-                        key=f"dl_csv_{idx}",
-                    )
-
-                # Matplotlib Chart PNG
-                if msg.get("figure_png") is not None:
-                    st.image(msg["figure_png"], **width_kwargs)
-                    st.download_button(
-                        label="📥 Download Chart (PNG)",
-                        data=msg["figure_png"],
-                        file_name="chart.png",
-                        mime="image/png",
-                        key=f"dl_png_{idx}",
-                    )
-
-                if msg.get("plotly_json"):
-                    render_plotly_chart(msg["plotly_json"], str(idx), width_kwargs)
-
-                if role == "assistant" and msg.get("pipeline_trace"):
-                    render_pipeline_trace(msg["pipeline_trace"])
-
-        # Handle New User Input
-        user_input = st.chat_input("Ask a question about your data in plain English...")
-
-        # Handle clicked suggestion prompt
-        if st.session_state.pending_prompt:
-            user_input = st.session_state.pending_prompt
-            st.session_state.pending_prompt = None
-
-        if user_input:
-            if not has_active_engine:
-                st.error("⚠️ No active AI engine found. Please add `GROQ_API_KEY` or `GEMINI_API_KEY` to your `.env` file.")
-                st.stop()
-                return
-
-            st.session_state.messages.append({
-                "role": "user",
-                "content": user_input,
-            })
-
-            with st.chat_message("user", avatar="🧑‍💻"):
-                st.markdown(user_input)
-
-            with st.chat_message("assistant", avatar="🤖"):
-                with st.spinner("Analyzing data and generating query via auto-pipeline..."):
-                    schema_context = get_df_schema_prompt(df)
-
-                    # Collect last 4 turns of context
-                    recent_history: List[str] = []
-                    for m in st.session_state.messages[-4:]:
-                        r = m.get("role")
-                        c = m.get("content", "")
-                        cd = m.get("code")
-                        if r == "user":
-                            recent_history.append(f"User: {c}")
-                        elif r == "assistant":
-                            if cd:
-                                recent_history.append(f"Assistant Query:\n```python\n{cd}\n```\nAnswer: {c}")
-                            else:
-                                recent_history.append(f"Assistant: {c}")
-
-                    # Execute via Ordered Auto-Failover Pipeline
-                    (
-                        code,
-                        exec_res,
-                        decline,
-                        active_label,
-                        pipeline_err,
-                        pipeline_trace,
-                    ) = execute_query_pipeline(
-                        prompt=user_input,
-                        df_schema=schema_context,
-                        df=df,
-                        conversation_history=recent_history,
-                    )
-
-                    if pipeline_err:
-                        pipeline_trace["grounded_status"] = "Not run (pipeline failed)"
-                        st.error(f"⚠️ **Pipeline Error**\n\n{pipeline_err}")
-                        st.session_state.messages.append({
-                            "role": "assistant",
-                            "content": pipeline_err,
-                            "status": "error",
-                            "failure_category": "Provider/API Error",
-                            "pipeline_trace": pipeline_trace,
-                        })
-
-                    elif decline:
-                        st.warning(f"🛡️ **Request Declined**\n\n{decline}")
-                        st.session_state.messages.append({
-                            "role": "assistant",
-                            "content": decline,
-                            "status": "declined",
-                            "route_label": active_label,
-                            "pipeline_trace": pipeline_trace,
-                        })
-
-                    elif exec_res and exec_res.get("error"):
-                        pipeline_trace["grounded_status"] = "Not run (execution failed)"
-                        cat, friendly_msg = classify_failure(exec_res["error"], df)
-                        st.error(f"⚠️ **{cat}**\n\n{friendly_msg}")
-                        if code and show_code:
-                            with st.expander("💻 View Attempted Code"):
-                                st.code(code, language="python")
-
-                        st.session_state.messages.append({
-                            "role": "assistant",
-                            "content": friendly_msg,
-                            "code": code,
-                            "status": "error",
-                            "failure_category": cat,
-                            "route_label": active_label,
-                            "pipeline_trace": pipeline_trace,
-                        })
-
-                    elif exec_res:
-                        # Grounded answer quoting real computed facts
-                        grounded_answer = generate_grounded_answer(
-                            prompt=user_input,
-                            code=code,
-                            exec_res=exec_res,
-                        )
-                        pipeline_trace["grounded_status"] = "Verified against computed output"
-
-                        st.markdown(grounded_answer)
-
-                        if active_label:
-                            st.markdown(f'<span class="route-tag">Engine: {active_label}</span>', unsafe_allow_html=True)
-
-                        if exec_res.get("stdout"):
-                            st.caption(f"Console Output:\n{exec_res['stdout']}")
-
-                        if code and show_code:
-                            with st.expander("💻 View Generated Python / Pandas Query"):
-                                st.code(code, language="python")
-
-                        if exec_res.get("result") is not None:
-                            st.write(exec_res["result"])
-
-                        if exec_res.get("result_df") is not None:
-                            st.dataframe(exec_res["result_df"], **width_kwargs)
-                            csv_data = exec_res["result_df"].to_csv(index=False).encode("utf-8")
-                            st.download_button(
-                                label="📥 Download Result Table as CSV",
-                                data=csv_data,
-                                file_name="query_result.csv",
-                                mime="text/csv",
-                                key=f"dl_csv_{len(st.session_state.messages)}",
+        with col_left:
+            st.markdown("#### ◈ Visual Stage")
+            with st.container(border=True):
+                stage_mode = st.radio(
+                    "Visual stage",
+                    ["📊 Active Query Visual", "📋 Dataset Overview"],
+                    horizontal=True,
+                    label_visibility="collapsed",
+                    index=0 if has_active_visual else 1,
+                    key="visual_stage_mode_v2",
+                )
+                if stage_mode == "📊 Active Query Visual":
+                    if has_active_visual:
+                        if latest_assistant.get("plotly_json"):
+                            active_figure = pio.from_json(latest_assistant["plotly_json"])
+                            st.plotly_chart(
+                                active_figure,
+                                key="stage_active_plotly",
+                                **width_kwargs,
                             )
-
-                        if exec_res.get("figure_png") is not None:
-                            st.image(exec_res["figure_png"], **width_kwargs)
                             st.download_button(
-                                label="📥 Download Chart (PNG)",
-                                data=exec_res["figure_png"],
+                                "🌐 Download Interactive Chart (HTML)",
+                                data=active_figure.to_html(full_html=True, include_plotlyjs=True),
+                                file_name="interactive_chart.html",
+                                mime="text/html",
+                                key="stage_active_html",
+                                **width_kwargs,
+                            )
+                        if latest_assistant.get("figure_png") is not None:
+                            st.image(latest_assistant["figure_png"], **width_kwargs)
+                            st.download_button(
+                                "📥 Download Chart (PNG)",
+                                data=latest_assistant["figure_png"],
                                 file_name="chart.png",
                                 mime="image/png",
-                                key=f"dl_png_{len(st.session_state.messages)}",
+                                key="stage_active_png",
+                                **width_kwargs,
+                            )
+                        if latest_assistant.get("result_df") is not None:
+                            st.dataframe(latest_assistant["result_df"], **width_kwargs)
+                            st.download_button(
+                                "📥 Download Result Table as CSV",
+                                data=latest_assistant["result_df"].to_csv(index=False).encode("utf-8"),
+                                file_name="query_result.csv",
+                                mime="text/csv",
+                                key="stage_active_csv",
+                                **width_kwargs,
+                            )
+                        if latest_assistant.get("result") is not None:
+                            st.metric("Verified Result", str(latest_assistant["result"]))
+                    else:
+                        st.info("Your latest chart or result table will appear here.")
+                else:
+                    overview = build_dataset_overview_figure(df)
+                    st.plotly_chart(
+                        overview,
+                        key="dataset_overview",
+                        **width_kwargs,
+                    )
+                    st.markdown("##### 📊 Data Preview")
+                    st.dataframe(df.head(8), hide_index=True, **width_kwargs)
+
+            with st.expander("🔍 Inspect Dataset · Preview, Schema & Statistics", expanded=False):
+                preview_tab, schema_tab, stats_tab = st.tabs(
+                    ["📋 Preview", "🏷️ Schema", "📊 Statistics"]
+                )
+                with preview_tab:
+                    st.dataframe(df.head(10), **width_kwargs)
+                with schema_tab:
+                    row_count = max(len(df), 1)
+                    col_summary = pd.DataFrame({
+                        "Column Name": df.columns,
+                        "Data Type": [str(dtype) for dtype in df.dtypes],
+                        "Non-Null Count": df.notnull().sum().values,
+                        "Null Count": df.isnull().sum().values,
+                        "Null Percentage (%)": (
+                            (df.isnull().sum() / row_count) * 100
+                        ).round(2).values,
+                        "Unique Values": [df[column].nunique() for column in df.columns],
+                    })
+                    st.dataframe(col_summary, hide_index=True, **width_kwargs)
+                with stats_tab:
+                    if len(df) == 0:
+                        st.info("Statistics are unavailable because this dataset has no rows.")
+                    else:
+                        st.dataframe(df.describe(include="all").T, **width_kwargs)
+
+        with col_right:
+            with st.container(border=True):
+                status_text = "Active" if has_active_engine else "Unavailable"
+                status_class = "status-pill" if has_active_engine else "status-pill-alert"
+                st.markdown(
+                    f"""
+                    <div style="display:flex;justify-content:space-between;align-items:center;gap:0.6rem;margin-bottom:0.7rem;">
+                        <div>
+                            <div class="panel-heading" style="margin-bottom:0.12rem;">Active Dataset</div>
+                            <div style="color:#d5e0dc;font-size:0.84rem;word-break:break-word;">{html.escape(st.session_state.df_name)}</div>
+                        </div>
+                        <span class="{status_class}">● {status_text}</span>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+                st.markdown(
+                    f"""
+                    <div class="kpi-card" style="margin-bottom:0.7rem;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;gap:0.8rem;">
+                            <div>
+                                <div class="kpi-label">Data Health Score</div>
+                                <div class="kpi-value" style="color:#e0bd79;">{profile['health_score']}%</div>
+                            </div>
+                            <div style="width:58%;max-width:250px;">{build_column_sparkline(df)}</div>
+                        </div>
+                        <div style="color:#9aa9a5;font-size:0.68rem;margin-top:0.15rem;">{profile['cols']} columns · {profile['missing_cells']} missing cells · {profile['duplicate_rows']} duplicates</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+                metric_values = [
+                    ("Total Rows", f"{df.shape[0]:,}"),
+                    ("Columns", f"{df.shape[1]:,}"),
+                    ("Missing Cells", f"{missing_count:,}"),
+                    (
+                        "Outliers / Duplicates",
+                        f"{profile['total_outliers']:,} / {profile['duplicate_rows']:,}",
+                    ),
+                ]
+                metric_col1, metric_col2 = st.columns(2)
+                for index, (label, value) in enumerate(metric_values):
+                    with (metric_col1 if index % 2 == 0 else metric_col2):
+                        st.markdown(
+                            f"""
+                            <div class="metric-tile">
+                                <div class="kpi-label">{label}</div>
+                                <div class="kpi-value">{value}</div>
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
+
+                st.markdown('<div class="panel-heading">🧠 AI Analysis Stream</div>', unsafe_allow_html=True)
+                with st.container(height=270, border=False):
+                    for idx, message in enumerate(st.session_state.messages):
+                        role = message.get("role", "user")
+                        with st.chat_message(role, avatar="🧑‍💻" if role == "user" else "🤖"):
+                            status = message.get("status", "success")
+                            if status == "error":
+                                category = message.get("failure_category", "Error")
+                                st.error(f"⚠️ **{category}**\n\n{message.get('content', '')}")
+                            elif status == "declined":
+                                st.warning(f"🛡️ **Request Declined**\n\n{message.get('content', '')}")
+                            else:
+                                st.markdown(message.get("content", ""))
+
+                            if message.get("route_label"):
+                                st.markdown(
+                                    f'<span class="route-tag">Engine: {html.escape(message["route_label"])}</span>',
+                                    unsafe_allow_html=True,
+                                )
+                            if message.get("code") and show_code:
+                                with st.expander("💻 View Code", expanded=False):
+                                    st.code(message["code"], language="python")
+                            if message.get("stdout"):
+                                st.caption(f"Console Output:\n{message['stdout']}")
+                            if message.get("result") is not None:
+                                st.write(message["result"])
+                            has_message_visual = any(
+                                message.get(key) is not None
+                                for key in ("result_df", "figure_png", "plotly_json")
+                            )
+                            if has_message_visual and role == "assistant":
+                                if idx == latest_assistant_idx:
+                                    st.caption("📌 Visual / table displayed on Visual Stage")
+                                else:
+                                    with st.expander("📊 View Visual / Table", expanded=False):
+                                        if message.get("result_df") is not None:
+                                            st.dataframe(message["result_df"], **width_kwargs)
+                                            st.download_button(
+                                                "📥 Download Result Table as CSV",
+                                                data=message["result_df"].to_csv(index=False).encode("utf-8"),
+                                                file_name="query_result.csv",
+                                                mime="text/csv",
+                                                key=f"dl_csv_{idx}",
+                                            )
+                                        if message.get("figure_png") is not None:
+                                            st.image(message["figure_png"], **width_kwargs)
+                                            st.download_button(
+                                                "📥 Download Chart (PNG)",
+                                                data=message["figure_png"],
+                                                file_name="chart.png",
+                                                mime="image/png",
+                                                key=f"dl_png_{idx}",
+                                            )
+                                        if message.get("plotly_json"):
+                                            render_plotly_chart(
+                                                message["plotly_json"],
+                                                str(idx),
+                                                width_kwargs,
+                                            )
+                            if role == "assistant" and message.get("pipeline_trace"):
+                                render_pipeline_trace(message["pipeline_trace"])
+
+                st.markdown('<div class="panel-heading">⚡ Suggested Commands</div>', unsafe_allow_html=True)
+                suggestions = generate_suggested_prompts(df)
+                prompt_cols = st.columns(2)
+                for index, suggestion in enumerate(suggestions):
+                    with prompt_cols[index % len(prompt_cols)]:
+                        if st.button(
+                            suggestion,
+                            key=f"sugg_{index}",
+                            **width_kwargs,
+                        ):
+                            st.session_state.pending_prompt = suggestion
+                            st.rerun()
+
+                user_input = st.chat_input("Ask a question about your CSV...")
+                if active_routes:
+                    agent_route = active_routes[0]
+                    agent_model = agent_route["primary_model"].replace("openai/", "")
+                    st.markdown(
+                        f'<span class="route-tag">⚡ {html.escape(agent_route["provider"])} {html.escape(agent_model)}</span>',
+                        unsafe_allow_html=True,
+                    )
+                if st.session_state.pending_prompt:
+                    user_input = st.session_state.pending_prompt
+                    st.session_state.pending_prompt = None
+
+                if user_input:
+                    if not has_active_engine:
+                        st.error("⚠️ No active AI engine found. Please configure an API key in `.env`.")
+                        st.stop()
+                        return
+
+                    st.session_state.messages.append({
+                        "role": "user",
+                        "content": user_input,
+                    })
+                    with st.chat_message("user", avatar="🧑‍💻"):
+                        st.markdown(user_input)
+
+                    with st.chat_message("assistant", avatar="🤖"):
+                        with st.spinner("Analyzing data and generating query via auto-pipeline..."):
+                            schema_context = get_df_schema_prompt(df)
+                            recent_history: List[str] = []
+                            for message in st.session_state.messages[-4:]:
+                                role = message.get("role")
+                                content = message.get("content", "")
+                                code = message.get("code")
+                                if role == "user":
+                                    recent_history.append(f"User: {content}")
+                                elif role == "assistant":
+                                    if code:
+                                        recent_history.append(
+                                            f"Assistant Query:\n```python\n{code}\n```\nAnswer: {content}"
+                                        )
+                                    else:
+                                        recent_history.append(f"Assistant: {content}")
+
+                            (
+                                code,
+                                exec_res,
+                                decline,
+                                active_label,
+                                pipeline_err,
+                                pipeline_trace,
+                            ) = execute_query_pipeline(
+                                prompt=user_input,
+                                df_schema=schema_context,
+                                df=df,
+                                conversation_history=recent_history,
                             )
 
-                        if exec_res.get("plotly_json"):
-                            render_plotly_chart(
-                                exec_res["plotly_json"],
-                                str(len(st.session_state.messages)),
-                                width_kwargs,
-                            )
+                            if pipeline_err:
+                                pipeline_trace["grounded_status"] = "Not run (pipeline failed)"
+                                st.error(f"⚠️ **Pipeline Error**\n\n{pipeline_err}")
+                                st.session_state.messages.append({
+                                    "role": "assistant",
+                                    "content": pipeline_err,
+                                    "status": "error",
+                                    "failure_category": "Provider/API Error",
+                                    "pipeline_trace": pipeline_trace,
+                                })
+                            elif decline:
+                                st.warning(f"🛡️ **Request Declined**\n\n{decline}")
+                                st.session_state.messages.append({
+                                    "role": "assistant",
+                                    "content": decline,
+                                    "status": "declined",
+                                    "route_label": active_label,
+                                    "pipeline_trace": pipeline_trace,
+                                })
+                            elif exec_res and exec_res.get("error"):
+                                pipeline_trace["grounded_status"] = "Not run (execution failed)"
+                                category, friendly_message = classify_failure(exec_res["error"], df)
+                                st.error(f"⚠️ **{category}**\n\n{friendly_message}")
+                                if code and show_code:
+                                    with st.expander("💻 View Attempted Code"):
+                                        st.code(code, language="python")
+                                st.session_state.messages.append({
+                                    "role": "assistant",
+                                    "content": friendly_message,
+                                    "code": code,
+                                    "status": "error",
+                                    "failure_category": category,
+                                    "route_label": active_label,
+                                    "pipeline_trace": pipeline_trace,
+                                })
+                            elif exec_res:
+                                grounded_answer = generate_grounded_answer(
+                                    prompt=user_input,
+                                    code=code,
+                                    exec_res=exec_res,
+                                )
+                                pipeline_trace["grounded_status"] = "Verified against computed output"
+                                st.markdown(grounded_answer)
+                                if active_label:
+                                    st.markdown(
+                                        f'<span class="route-tag">Engine: {html.escape(active_label)}</span>',
+                                        unsafe_allow_html=True,
+                                    )
+                                if exec_res.get("stdout"):
+                                    st.caption(f"Console Output:\n{exec_res['stdout']}")
+                                if code and show_code:
+                                    with st.expander("💻 View Code", expanded=False):
+                                        st.code(code, language="python")
+                                if exec_res.get("result") is not None:
+                                    st.write(exec_res["result"])
+                                if any(
+                                    exec_res.get(key) is not None
+                                    for key in ("result_df", "figure_png", "plotly_json")
+                                ):
+                                    st.caption("📌 Visual / table displayed on Visual Stage")
+                                st.session_state.messages.append({
+                                    "role": "assistant",
+                                    "content": grounded_answer,
+                                    "code": code,
+                                    "result": exec_res.get("result"),
+                                    "result_df": exec_res.get("result_df"),
+                                    "figure_png": exec_res.get("figure_png"),
+                                    "plotly_json": exec_res.get("plotly_json"),
+                                    "stdout": exec_res.get("stdout"),
+                                    "route_label": active_label,
+                                    "status": "success",
+                                    "pipeline_trace": pipeline_trace,
+                                })
 
-                        st.session_state.messages.append({
-                            "role": "assistant",
-                            "content": grounded_answer,
-                            "code": code,
-                            "result": exec_res.get("result"),
-                            "result_df": exec_res.get("result_df"),
-                            "figure_png": exec_res.get("figure_png"),
-                            "plotly_json": exec_res.get("plotly_json"),
-                            "stdout": exec_res.get("stdout"),
-                            "route_label": active_label,
-                            "status": "success",
-                            "pipeline_trace": pipeline_trace,
-                        })
-
-                render_pipeline_trace(pipeline_trace)
+                        render_pipeline_trace(pipeline_trace)
+                    if exec_res and any(
+                        exec_res.get(key) is not None
+                        for key in ("result_df", "figure_png", "plotly_json")
+                    ):
+                        st.session_state["pending_visual_stage_mode_v2"] = (
+                            "📊 Active Query Visual"
+                        )
+                    st.rerun()
 
     # ==========================================================================
     # TAB 2: Data Profiler & Preprocessing
     # ==========================================================================
     with tab_profiler:
-        profile = compute_data_profile(df)
-
         # 4 Profiler Metric Cards
         p_col1, p_col2, p_col3, p_col4 = st.columns(4)
         health_score = profile["health_score"]
@@ -1374,10 +1821,17 @@ def main():
 
         with act_col3:
             cleaned_csv_bytes = st.session_state.df.to_csv(index=False).encode("utf-8")
+            cleaned_source_name = re.sub(
+                r"\s*\(Spotify Tracks\)\s*$",
+                "",
+                str(st.session_state.df_name),
+            )
+            cleaned_source_name = os.path.basename(cleaned_source_name)
+            cleaned_stem = os.path.splitext(cleaned_source_name)[0] or "dataset"
             st.download_button(
                 label="📥 Download Cleaned CSV",
                 data=cleaned_csv_bytes,
-                file_name=f"cleaned_{st.session_state.df_name}",
+                file_name=f"cleaned_{cleaned_stem}.csv",
                 mime="text/csv",
                 key="btn_dl_cleaned_csv",
                 **width_kwargs,
@@ -1415,11 +1869,8 @@ def main():
         # Optional AI Executive Briefing
         if st.button("🤖 Enrich Insights with AI", key="btn_enrich_ai", **width_kwargs):
             with st.spinner("Generating AI executive briefing grounded in dataset profile..."):
-                routes = get_available_routes()
-                if routes:
-                    route = routes[0]
-                    deterministic_insights = "\n".join(f"- {bullet}" for bullet in eda_bullets)
-                    prompt = f"""You are a principal data scientist. Based STRICTLY on the computed data profile metrics below, provide a high-level executive briefing (3 concise paragraphs) detailing key statistical takeaways, potential data risks, and recommended modeling strategies. DO NOT hallucinate.
+                deterministic_insights = "\n".join(f"- {bullet}" for bullet in eda_bullets)
+                prompt = f"""Based STRICTLY on the computed data profile metrics below, provide a high-level executive briefing (3 concise paragraphs) detailing key statistical takeaways, potential data risks, and recommended modeling strategies. DO NOT hallucinate.
 
 Dataset Name: {st.session_state.df_name}
 Rows: {profile['rows']:,}, Columns: {profile['cols']}
@@ -1433,19 +1884,7 @@ Columns: {list(st.session_state.df.columns)}
 Deterministic EDA Insights (cite these exact computed findings, including class percentages):
 {deterministic_insights}
 """
-                    try:
-                        code, ai_insight, err = call_llm_code_generator_single(
-                            prompt=prompt,
-                            df_schema="",
-                            provider=route["provider"],
-                            model_name=route["primary_model"],
-                            api_key=route["api_key"],
-                        )
-                        st.session_state["ai_eda_insight"] = ai_insight or code or err
-                    except Exception as ex:
-                        st.session_state["ai_eda_insight"] = f"AI briefing unavailable: {ex}"
-                else:
-                    st.session_state["ai_eda_insight"] = "No API keys configured in .env for AI briefing."
+                st.session_state["ai_eda_insight"] = generate_executive_briefing(prompt)
 
         if st.session_state.get("ai_eda_insight"):
             with st.container(border=True):
@@ -1482,7 +1921,18 @@ Deterministic EDA Insights (cite these exact computed findings, including class 
                 **width_kwargs,
             ):
                 with st.spinner("Running sandbox security and reference-query checks..."):
-                    st.session_state.evaluation_result = run_offline_security_eval(df)
+                    offline_result = run_offline_security_eval(df)
+                    st.session_state.evaluation_result = offline_result
+                    saved_metrics = dict(st.session_state.offline_security_metrics)
+                    for key in (
+                        "security_block_rate_pct",
+                        "false_positive_rate_pct",
+                        "average_sandbox_latency_ms",
+                    ):
+                        value = offline_result["metrics"].get(key)
+                        if value is not None:
+                            saved_metrics[key] = value
+                    st.session_state.offline_security_metrics = saved_metrics
 
         with live_col:
             if st.button(
@@ -1491,6 +1941,20 @@ Deterministic EDA Insights (cite these exact computed findings, including class 
                 **width_kwargs,
             ):
                 routes = get_available_routes()
+                progress_bar = st.progress(0.0)
+                progress_caption = st.empty()
+
+                def update_live_progress(
+                    current: int,
+                    total: int,
+                    case_id: str,
+                    status_msg: str,
+                ) -> None:
+                    progress_bar.progress(current / total if total else 0.0)
+                    progress_caption.caption(
+                        f"{current}/{total} · {case_id} · {status_msg}"
+                    )
+
                 try:
                     with st.spinner("Running live provider benchmark; this may use API quota..."):
                         if provider_choice == "Groq vs Google Gemini":
@@ -1499,6 +1963,7 @@ Deterministic EDA Insights (cite these exact computed findings, including class 
                                 routes=routes,
                                 generate_pandas_code=call_llm_code_generator_single,
                                 suite_mode=suite_mode,
+                                progress_callback=update_live_progress,
                             )
                         else:
                             result = run_live_llm_eval(
@@ -1507,93 +1972,250 @@ Deterministic EDA Insights (cite these exact computed findings, including class 
                                 generate_pandas_code=call_llm_code_generator_single,
                                 provider=provider_choice,
                                 suite_mode=suite_mode,
+                                progress_callback=update_live_progress,
                             )
                     st.session_state.evaluation_result = result
+                    saved_metrics = dict(st.session_state.live_benchmark_metrics)
+                    for key in (
+                        "pass_at_1_accuracy_pct",
+                        "self_healed_pass_at_3_accuracy_pct",
+                        "average_latency_ms",
+                    ):
+                        value = result["metrics"].get(key)
+                        if value is not None:
+                            saved_metrics[key] = value
+                    st.session_state.live_benchmark_metrics = saved_metrics
                 except ValueError as ex:
                     st.error(str(ex))
 
         evaluation = st.session_state.get("evaluation_result")
-        if evaluation:
-            metrics = evaluation["metrics"]
-            is_offline = evaluation["mode"].startswith("Offline")
-            average_latency = (
-                metrics.get("average_sandbox_latency_ms")
-                if is_offline
-                else metrics.get("average_latency_ms")
+        metrics = evaluation["metrics"] if evaluation else {}
+        is_offline = bool(evaluation and evaluation["mode"].startswith("Offline"))
+        offline_metrics = st.session_state.offline_security_metrics
+        live_metrics = st.session_state.live_benchmark_metrics
+
+        security_block_rate = metrics.get("security_block_rate_pct")
+        if security_block_rate is None:
+            security_block_rate = offline_metrics.get("security_block_rate_pct")
+        false_positive_rate = metrics.get("false_positive_rate_pct")
+        if false_positive_rate is None:
+            false_positive_rate = offline_metrics.get("false_positive_rate_pct")
+        pass_at_1 = metrics.get("pass_at_1_accuracy_pct")
+        if pass_at_1 is None:
+            pass_at_1 = live_metrics.get("pass_at_1_accuracy_pct")
+        pass_at_3 = metrics.get("self_healed_pass_at_3_accuracy_pct")
+        if pass_at_3 is None:
+            pass_at_3 = live_metrics.get("self_healed_pass_at_3_accuracy_pct")
+        average_latency = (
+            metrics.get("average_sandbox_latency_ms")
+            if is_offline
+            else metrics.get("average_latency_ms")
+        )
+        if average_latency is None:
+            average_latency = live_metrics.get("average_latency_ms")
+        if average_latency is None:
+            average_latency = offline_metrics.get("average_sandbox_latency_ms")
+
+        def format_kpi(value: Optional[float], suffix: str = "%") -> str:
+            return "Not Run" if value is None else f"{value:,.1f}{suffix}"
+
+        with st.expander("📖 Metric Definitions & Benchmark Methodology", expanded=False):
+            st.markdown(
+                """
+                - **Security Block Rate:** Share of malicious security payloads stopped by the sandbox; the goal is **100%**.
+                - **False-Positive Rate:** Share of safe reference queries wrongly blocked; the goal is **0%**.
+                - **Pass@1 Accuracy:** Share of live prompts solved on the first LLM attempt, with no retries.
+                - **Self-Healed Pass@3:** Share of live prompts solved within three attempts, including traceback-guided corrections.
+                - **Average Latency:** Mean query-to-result time plus sandbox execution; offline runs report sandbox execution time only.
+
+                **Fast Subset (6 queries)** checks live functional, visualization, and recovery prompts. The **Offline Audit** makes no LLM calls and measures security blocking and false positives against the security/reference-query suite.
+                """
             )
 
-            def format_kpi(value: Optional[float], suffix: str = "%") -> str:
-                return "N/A" if value is None else f"{value:,.1f}{suffix}"
-
-            st.markdown(f"#### Latest Run: {evaluation['mode']}")
-            metric_cards = [
-                ("Security Block Rate", format_kpi(metrics.get("security_block_rate_pct"))),
-                ("False-Positive Rate", format_kpi(metrics.get("false_positive_rate_pct"))),
-                ("Pass@1 Accuracy", format_kpi(metrics.get("pass_at_1_accuracy_pct"))),
-                (
-                    "Self-Healed Pass@3",
-                    format_kpi(metrics.get("self_healed_pass_at_3_accuracy_pct")),
-                ),
-                ("Avg Latency (ms)", format_kpi(average_latency, " ms")),
-            ]
-            metric_columns = st.columns(5)
-            for column, (label, value) in zip(metric_columns, metric_cards):
-                with column:
-                    st.markdown(
-                        f"""
-                        <div class="kpi-card">
+        metric_cards = [
+            (
+                "Security Block Rate",
+                format_kpi(security_block_rate),
+                "Malicious payloads stopped (Goal: 100%)",
+            ),
+            (
+                "False-Positive Rate",
+                format_kpi(false_positive_rate),
+                "Safe queries wrongly blocked (Goal: 0%)",
+            ),
+            (
+                "Pass@1 Accuracy",
+                format_kpi(pass_at_1),
+                "Solved on 1st LLM attempt (0 retries)",
+            ),
+            (
+                "Self-Healed Pass@3",
+                format_kpi(pass_at_3),
+                "Solved within 3 tries via traceback fix",
+            ),
+            (
+                "Avg Latency (ms)",
+                format_kpi(average_latency, " ms"),
+                "Mean end-to-end query + sandbox time",
+            ),
+        ]
+        metric_columns = st.columns(5)
+        for column, (label, value, caption) in zip(metric_columns, metric_cards):
+            with column:
+                st.markdown(
+                    f"""
+                    <div class="kpi-card evaluation-kpi-card">
+                        <div>
                             <div class="kpi-label">{label}</div>
                             <div class="kpi-value">{value}</div>
                         </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
+                        <div class="evaluation-kpi-caption">{caption}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
+        if evaluation:
+            st.markdown(f"#### Latest Run: {evaluation['mode']}")
             if not is_offline:
                 comparison = evaluation.get("provider_comparison")
                 if isinstance(comparison, pd.DataFrame) and not comparison.empty:
                     chart_col1, chart_col2 = st.columns(2)
                     with chart_col1:
                         st.markdown("##### Pass@1 vs Self-Healed Pass@3")
-                        pass_chart = comparison.set_index("Provider")[
-                            ["Pass@1 Accuracy (%)", "Self-Healed Pass@3 Accuracy (%)"]
-                        ]
-                        st.bar_chart(pass_chart, **width_kwargs)
+                        pass_chart = px.bar(
+                            comparison,
+                            x="Provider",
+                            y=[
+                                "Pass@1 Accuracy (%)",
+                                "Self-Healed Pass@3 Accuracy (%)",
+                            ],
+                            barmode="group",
+                            text_auto=True,
+                            color_discrete_sequence=["#e0bd79", "#34d399"],
+                        )
+                        st.plotly_chart(
+                            _style_evaluation_figure(pass_chart),
+                            key="eval_provider_pass_chart",
+                            **width_kwargs,
+                        )
                     with chart_col2:
                         st.markdown("##### Provider Latency Comparison")
-                        latency_chart = comparison.set_index("Provider")[["Average Latency (ms)"]]
-                        st.bar_chart(latency_chart, **width_kwargs)
+                        latency_chart = px.bar(
+                            comparison,
+                            x="Provider",
+                            y="Average Latency (ms)",
+                            color="Provider",
+                            text_auto=True,
+                            color_discrete_map={
+                                "Groq": "#e0bd79",
+                                "Google Gemini": "#34d399",
+                            },
+                        )
+                        st.plotly_chart(
+                            _style_evaluation_figure(latency_chart),
+                            key="eval_provider_latency_chart",
+                            **width_kwargs,
+                        )
                 else:
                     chart_col1, chart_col2 = st.columns(2)
                     with chart_col1:
                         st.markdown("##### Pass@1 vs Self-Healed Pass@3")
                         pass_chart = pd.DataFrame(
-                            {
-                                "Accuracy (%)": [
-                                    metrics.get("pass_at_1_accuracy_pct"),
-                                    metrics.get("self_healed_pass_at_3_accuracy_pct"),
-                                ]
-                            },
-                            index=["Pass@1", "Self-Healed Pass@3"],
+                            [
+                                {
+                                    "Metric": "Pass@1",
+                                    "Accuracy (%)": metrics.get("pass_at_1_accuracy_pct"),
+                                },
+                                {
+                                    "Metric": "Self-Healed Pass@3",
+                                    "Accuracy (%)": metrics.get(
+                                        "self_healed_pass_at_3_accuracy_pct"
+                                    ),
+                                },
+                            ]
                         ).dropna()
                         if not pass_chart.empty:
-                            st.bar_chart(pass_chart, **width_kwargs)
+                            pass_figure = px.bar(
+                                pass_chart,
+                                x="Metric",
+                                y="Accuracy (%)",
+                                color="Metric",
+                                text_auto=True,
+                                color_discrete_map={
+                                    "Pass@1": "#e0bd79",
+                                    "Self-Healed Pass@3": "#34d399",
+                                },
+                            )
+                            st.plotly_chart(
+                                _style_evaluation_figure(pass_figure),
+                                key="eval_pass_chart",
+                                **width_kwargs,
+                            )
                     with chart_col2:
                         st.markdown("##### Average End-to-End Latency")
                         if average_latency is not None:
                             latency_chart = pd.DataFrame(
-                                {"Average Latency (ms)": [average_latency]},
-                                index=[metrics.get("provider", provider_choice)],
+                                {
+                                    "Provider": [
+                                        metrics.get("provider", provider_choice)
+                                    ],
+                                    "Average Latency (ms)": [average_latency],
+                                }
                             )
-                            st.bar_chart(latency_chart, **width_kwargs)
+                            latency_figure = px.bar(
+                                latency_chart,
+                                x="Provider",
+                                y="Average Latency (ms)",
+                                text_auto=True,
+                                color_discrete_sequence=["#34d399"],
+                            )
+                            st.plotly_chart(
+                                _style_evaluation_figure(latency_figure),
+                                key="eval_latency_chart",
+                                **width_kwargs,
+                            )
             else:
                 st.markdown("##### Offline Case Outcomes")
-                outcome_counts = evaluation["results"]["Final Status"].value_counts()
+                outcome_counts = (
+                    evaluation["results"]["Final Status"]
+                    .value_counts()
+                    .rename_axis("Final Status")
+                    .reset_index(name="Cases")
+                )
                 if not outcome_counts.empty:
-                    st.bar_chart(outcome_counts, **width_kwargs)
+                    outcome_chart = px.bar(
+                        outcome_counts,
+                        x="Cases",
+                        y="Final Status",
+                        orientation="h",
+                        color="Final Status",
+                        text_auto=True,
+                        color_discrete_sequence=["#34d399", "#e0bd79"],
+                    )
+                    st.plotly_chart(
+                        _style_evaluation_figure(outcome_chart),
+                        key="eval_offline_outcome_chart",
+                        **width_kwargs,
+                    )
 
-            st.markdown("##### Detailed Per-Case Results")
-            st.dataframe(evaluation["results"], hide_index=True, **width_kwargs)
+            title_col, reset_col = st.columns([1.55, 1.0])
+            with title_col:
+                st.markdown("##### Detailed Per-Case Results")
+            with reset_col:
+                if st.button(
+                    "↻ Reset Hidden Columns",
+                    key="reset_eval_hidden_columns",
+                    **width_kwargs,
+                ):
+                    st.session_state.eval_table_rev += 1
+                    st.rerun()
+            st.dataframe(
+                evaluation["results"],
+                hide_index=True,
+                key=f"eval_per_case_df_{st.session_state.eval_table_rev}",
+                **width_kwargs,
+            )
             export_col1, export_col2 = st.columns(2)
             with export_col1:
                 st.download_button(
@@ -1607,7 +2229,10 @@ Deterministic EDA Insights (cite these exact computed findings, including class 
             with export_col2:
                 st.download_button(
                     "📥 Download Evaluation Metrics (JSON)",
-                    data=export_metrics_json(evaluation),
+                    data=export_metrics_json(
+                        evaluation,
+                        offline_security_metrics=st.session_state.offline_security_metrics,
+                    ),
                     file_name="evaluation_metrics.json",
                     mime="application/json",
                     key="download_eval_json",

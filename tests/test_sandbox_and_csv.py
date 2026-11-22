@@ -25,6 +25,8 @@ from sandbox import (
 )
 from app import (
     _build_gemini_generate_config,
+    _build_gemini_http_options,
+    build_dataset_overview_figure,
     call_llm_code_generator_single,
     generate_grounded_answer,
     get_available_routes,
@@ -245,6 +247,20 @@ def test_security_blocked_pd_read_csv(spotify_df: pd.DataFrame):
     assert "Security Restriction" in res["error"]
 
 
+@pytest.mark.parametrize(
+    ("code", "blocked_method"),
+    [
+        ("fig.write_json('chart.json')", "write_json"),
+        ("fig.show()", "show"),
+    ],
+)
+def test_security_blocked_plotly_write_json_and_show(code, blocked_method):
+    """Plotly file writes and browser popups must be blocked before execution."""
+    is_valid, err = validate_code_ast(code)
+    assert not is_valid
+    assert blocked_method in err
+
+
 def test_security_blocked_dunder_traversal(spotify_df: pd.DataFrame):
     """Penetration test: '().__class__.__base__.__subclasses__()' must be blocked."""
     code = "subclasses = ().__class__.__base__.__subclasses__()"
@@ -409,6 +425,17 @@ def test_csv_loading_zero_row_dataframe():
     assert list(df.columns) == ["col_a", "col_b", "col_c"]
 
 
+def test_schema_preview_limits_wide_dataframes_to_twenty_columns():
+    df_wide = pd.DataFrame(
+        [{f"column_{index}": f"value_{index}" for index in range(22)}]
+    )
+    schema = get_df_schema_prompt(df_wide)
+    preview = schema.split("First 3 rows preview:", maxsplit=1)[1]
+    assert "column_19" in preview
+    assert "column_20" not in preview
+    assert "column_21" not in preview
+
+
 def test_fuzzy_column_suggestion_on_misspelling(spotify_df: pd.DataFrame):
     """
     Verifies that when a column name is misspelled in a query (e.g. KeyError: 'danceabiliy'),
@@ -418,6 +445,19 @@ def test_fuzzy_column_suggestion_on_misspelling(spotify_df: pd.DataFrame):
     cat, msg = classify_failure(error_msg, spotify_df)
     assert cat == "Unknown Column"
     assert "danceability" in msg
+
+
+def test_fuzzy_column_suggestion_on_keyerror_index_list(spotify_df: pd.DataFrame):
+    error_msg = """KeyError: "['danceabiliy'] not in index" """
+    category, message = classify_failure(error_msg, spotify_df)
+    assert category == "Unknown Column"
+    assert "danceability" in message
+
+
+def test_keyerror_column_suggestion_accepts_single_character_column_name():
+    suite = build_benchmark_suite(pd.DataFrame({"A": [1, 2, 3]}))
+    typo_case = next(case for case in suite if case["case_id"] == "EDGE-01")
+    assert "A_x" in typo_case["prompt"]
 
 
 def test_suggested_prompts_detects_binary_target(spotify_df: pd.DataFrame):
@@ -438,7 +478,7 @@ def test_suggested_prompts_detects_binary_target(spotify_df: pd.DataFrame):
 def test_get_available_routes_gemini_and_groq_order():
     """
     Verifies that get_available_routes builds an ordered failover route list:
-    1. Groq (primary: openai/gpt-oss-20b, fallback: openai/gpt-oss-120b)
+    1. Groq (primary: openai/gpt-oss-120b, fallback: openai/gpt-oss-20b)
     2. Google Gemini (primary: gemini-4-hydrogen, fallback: gemini-flash-latest)
     without mutating keys or global os.environ.
     """
@@ -449,8 +489,8 @@ def test_get_available_routes_gemini_and_groq_order():
     routes = get_available_routes(mock_env)
     assert len(routes) == 2
     assert routes[0]["provider"] == "Groq"
-    assert routes[0]["primary_model"] == "openai/gpt-oss-20b"
-    assert routes[0]["fallback_model"] == "openai/gpt-oss-120b"
+    assert routes[0]["primary_model"] == "openai/gpt-oss-120b"
+    assert routes[0]["fallback_model"] == "openai/gpt-oss-20b"
     assert routes[0]["api_key"] == "mock_groq_key"
 
     assert routes[1]["provider"] == "Google Gemini"
@@ -575,6 +615,45 @@ def test_gemini_4_config_falls_back_without_thinking_support():
     assert config.options == {"temperature": 0.1}
 
 
+@pytest.mark.parametrize(
+    ("model_name", "expected_options"),
+    [
+        ("gemini-4-hydrogen", {"timeout": 25_000}),
+        ("gemini-flash-latest", {"timeout": 25_000, "api_version": "v1beta"}),
+    ],
+)
+def test_gemini_http_options_use_safe_timeout(model_name, expected_options):
+    class HttpOptions:
+        def __init__(self, **options):
+            self.options = options
+
+    fake_types = SimpleNamespace(HttpOptions=HttpOptions)
+    options = _build_gemini_http_options(fake_types, model_name)
+    assert options.options == expected_options
+
+
+def test_dataset_overview_uses_heatmap_for_two_numeric_columns(spotify_df):
+    figure = build_dataset_overview_figure(spotify_df)
+    assert len(figure.data) == 1
+    assert figure.data[0].type == "heatmap"
+    assert len(figure.data[0].x) <= 8
+    assert figure.layout.template.layout.plot_bgcolor == "rgb(17,17,17)"
+    assert figure.layout.paper_bgcolor == "rgba(0,0,0,0)"
+    assert figure.layout.plot_bgcolor == "rgba(11,21,20,0.45)"
+
+
+def test_dataset_overview_falls_back_to_column_counts():
+    df = pd.DataFrame({
+        "team": ["b", "a", "b"],
+        "score": [2.0, 1.0, np.nan],
+    })
+    figure = build_dataset_overview_figure(df)
+    assert figure.data
+    assert all(trace.type == "bar" for trace in figure.data)
+    assert {trace.name for trace in figure.data} == {"Non-null count", "Unique values"}
+    assert figure.layout.paper_bgcolor == "rgba(0,0,0,0)"
+
+
 def test_get_available_routes_groq_only():
     """Verifies fallback when only GROQ_API_KEY is configured."""
     mock_env = {"GROQ_API_KEY": "groq_only_key"}
@@ -657,6 +736,108 @@ def test_apply_preprocessing_imputation_and_outliers(spotify_df: pd.DataFrame):
     assert any("clipped" in log.lower() or "winsorized" in log.lower() for log in logs)
 
 
+def test_apply_preprocessing_remove_iqr_with_nullable_int64_na():
+    df_with_missing_outlier = pd.DataFrame(
+        {
+            "measurement": pd.Series(
+                [1, 2, 3, 4, 1000, pd.NA],
+                dtype="Int64",
+            )
+        }
+    )
+    cleaned, logs = apply_preprocessing(
+        df_with_missing_outlier,
+        outlier_strategy="remove_iqr",
+    )
+    assert 1000 not in cleaned["measurement"].dropna().tolist()
+    assert cleaned["measurement"].isna().sum() == 1
+    assert any("removed" in log.lower() for log in logs)
+
+
+def test_pandas_string_dtype_mixed_profile_preprocessing_and_prompts():
+    """Covers Pandas 3 StringDtype alongside nullable and non-numeric columns."""
+    df_mixed = pd.DataFrame(
+        {
+            "text": pd.Series(
+                ["  alpha  ", "beta", pd.NA, "   ", "gamma", " duplicate ", " duplicate "],
+                dtype="string",
+            ),
+            "nullable_count": pd.Series(
+                [1, 2, 5, pd.NA, pd.NA, 1000, 1000],
+                dtype="Int64",
+            ),
+            "measure": [1.0, 2.0, 3.0, 4.0, 5.0, 1000.0, 1000.0],
+            "event_date": pd.to_datetime(
+                [
+                    "2024-01-01",
+                    "2024-01-02",
+                    None,
+                    "2024-01-04",
+                    "2024-01-05",
+                    "2024-01-06",
+                    "2024-01-06",
+                ]
+            ),
+            "enabled": pd.Series(
+                [True, False, None, True, False, True, True],
+                dtype="boolean",
+            ),
+            "category_text": pd.Categorical(
+                [" x ", "y", "   ", "x", "y", "x", "x"]
+            ),
+            "constant": ["same"] * 7,
+        }
+    )
+
+    profile = compute_data_profile(df_mixed)
+    assert profile["rows"] == 7
+    assert profile["numeric_cols"] == 2
+    prompts = generate_suggested_prompts(df_mixed)
+    assert any("top categories in 'text'" in prompt for prompt in prompts)
+
+    cleaned, logs = apply_preprocessing(
+        df_mixed,
+        drop_duplicates=True,
+        strip_whitespace=True,
+        impute_strategy="median_mode",
+        outlier_strategy="clip_iqr",
+        drop_constant_cols=True,
+    )
+    assert len(cleaned) == 6
+    assert "constant" not in cleaned.columns
+    assert cleaned["text"].str.strip().eq(cleaned["text"]).all()
+    assert cleaned["text"].notna().all()
+    assert not cleaned["text"].eq("nan").any()
+    assert isinstance(cleaned["category_text"].dtype, pd.CategoricalDtype)
+    assert cleaned["category_text"].notna().all()
+    assert set(cleaned["category_text"].cat.categories) == {"x", "y"}
+    assert pd.api.types.is_float_dtype(cleaned["nullable_count"])
+    assert cleaned["nullable_count"].isna().sum() == 0
+    assert cleaned["nullable_count"].max() < 1000
+    assert cleaned["measure"].max() < 1000
+    assert cleaned["event_date"].isna().sum() == 0
+    assert cleaned["enabled"].isna().sum() == 0
+    assert any("duplicate" in log.lower() for log in logs)
+
+
+def test_deterministic_eda_binary_target_uses_actual_labels():
+    df_binary = pd.DataFrame(
+        {
+            "target": [1, 1, 2, 2, 2],
+            "measurement": [1.0, 2.0, 3.0, 4.0, 5.0],
+        }
+    )
+    insights = build_deterministic_eda_insights(
+        df_binary,
+        compute_data_profile(df_binary),
+    )
+    distribution = next(
+        insight for insight in insights if "Target Distribution" in insight
+    )
+    assert "60.0% class 2" in distribution
+    assert "40.0% class 1" in distribution
+
+
 def test_export_session_report_markdown(spotify_df: pd.DataFrame):
     """Verifies that the session report markdown formats dataset info, audit steps, and Q&A."""
     prof = compute_data_profile(spotify_df)
@@ -716,7 +897,10 @@ def test_eval_suite_structure_and_export_formats(spotify_df: pd.DataFrame):
     sample_result = {
         "mode": "Offline Sandbox & Guardrail Audit",
         "run_at": "2026-11-22T00:00:00+00:00",
-        "metrics": {"security_block_rate_pct": 100.0, "false_positive_rate_pct": 0.0},
+        "metrics": {
+            "security_block_rate_pct": 50.0,
+            "false_positive_rate_pct": 10.0,
+        },
         "results": pd.DataFrame(
             [{
                 "Case ID": "SEC-01",
@@ -738,13 +922,75 @@ def test_eval_suite_structure_and_export_formats(spotify_df: pd.DataFrame):
     assert csv_frame.loc[0, "Case ID"] == "SEC-01"
     assert csv_frame.loc[0, "Latency (ms)"] == 1.25
 
-    metrics = json.loads(export_metrics_json(sample_result))
+    metrics = json.loads(
+        export_metrics_json(
+            sample_result,
+            offline_security_metrics={
+                "security_block_rate_pct": 100.0,
+                "false_positive_rate_pct": 0.0,
+                "average_sandbox_latency_ms": 1.25,
+            },
+        )
+    )
     assert metrics["mode"] == sample_result["mode"]
-    assert metrics["metrics"]["security_block_rate_pct"] == 100.0
+    assert metrics["metrics"]["security_block_rate_pct"] == 50.0
+    assert metrics["metrics"]["false_positive_rate_pct"] == 10.0
+    assert metrics["metrics"]["average_sandbox_latency_ms"] == 1.25
+    assert sample_result["metrics"]["security_block_rate_pct"] == 50.0
+
+
+def test_export_metrics_json_merges_missing_offline_security_metrics():
+    result = {
+        "mode": "Live LLM Benchmark",
+        "run_at": "2026-11-22T00:00:00+00:00",
+        "metrics": {
+            "security_block_rate_pct": None,
+            "false_positive_rate_pct": None,
+            "average_sandbox_latency_ms": None,
+        },
+    }
+    offline_metrics = {
+        "security_block_rate_pct": 100.0,
+        "false_positive_rate_pct": 0.0,
+        "average_sandbox_latency_ms": 1.25,
+    }
+
+    exported = json.loads(
+        export_metrics_json(
+            result,
+            offline_security_metrics=offline_metrics,
+        )
+    )
+
+    assert exported["metrics"] == offline_metrics
+    assert json.loads(export_metrics_json(result))["metrics"] == result["metrics"]
+
+
+def test_export_metrics_json_sanitizes_non_finite_provider_values():
+    result = {
+        "mode": "Provider Comparison",
+        "run_at": "2026-11-22T00:00:00+00:00",
+        "metrics": {"example_metric": np.nan, "non_finite": np.inf},
+        "provider_comparison": pd.DataFrame(
+            [{
+                "Provider": "Groq",
+                "Pass@1 Accuracy (%)": np.nan,
+                "Average Latency (ms)": -np.inf,
+            }]
+        ),
+    }
+
+    exported = json.loads(export_metrics_json(result))
+    assert exported["metrics"]["example_metric"] is None
+    assert exported["metrics"]["non_finite"] is None
+    assert exported["provider_comparison"][0]["Pass@1 Accuracy (%)"] is None
+    assert exported["provider_comparison"][0]["Average Latency (ms)"] is None
 
 
 def test_live_eval_retries_and_provider_comparison_without_api_calls(spotify_df: pd.DataFrame):
     """Verifies live-eval accounting with fake provider/executor callbacks only."""
+    generated_models = []
+
     def fake_generator(
         prompt,
         df_schema,
@@ -755,6 +1001,7 @@ def test_live_eval_retries_and_provider_comparison_without_api_calls(spotify_df:
         retry_error=None,
         previous_code=None,
     ):
+        generated_models.append((provider, model_name))
         if "groupby" in prompt and not retry_error:
             return "result = df['missing_column'].mean()", None, None
         if "groupby" in prompt:
@@ -786,6 +1033,7 @@ def test_live_eval_retries_and_provider_comparison_without_api_calls(spotify_df:
             "label": "Google Gemini",
         },
     ]
+    progress_updates = []
     result = run_live_llm_eval(
         spotify_df,
         routes,
@@ -793,20 +1041,31 @@ def test_live_eval_retries_and_provider_comparison_without_api_calls(spotify_df:
         provider="Groq",
         suite_mode="Fast Subset (6 queries)",
         executor=fake_executor,
+        progress_callback=lambda current, total, case_id, status: progress_updates.append(
+            (current, total, case_id, status)
+        ),
     )
     assert result["metrics"]["pass_at_1_accuracy_pct"] < 100
     assert result["metrics"]["self_healed_pass_at_3_accuracy_pct"] == 100
     assert result["metrics"]["off_topic_rejection_accuracy_pct"] == 100
     groupby_row = result["results"].loc[result["results"]["Case ID"] == "AGG-03"].iloc[0]
     assert groupby_row["Retries"] == 1
-    assert groupby_row["Final Status"] == "Passed after retries/fallback"
+    assert groupby_row["Final Status"] == "Passed after retries"
+    assert {model for _, model in generated_models} == {"primary-model"}
+    assert progress_updates[-1][:2] == (6, 6)
 
+    progress_updates.clear()
     comparison = compare_providers_eval(
         spotify_df,
         routes,
         fake_generator,
         suite_mode="Fast Subset (6 queries)",
         executor=fake_executor,
+        progress_callback=lambda current, total, case_id, status: progress_updates.append(
+            (current, total, case_id, status)
+        ),
     )
     assert comparison["provider_comparison"]["Provider"].tolist() == ["Groq", "Google Gemini"]
     assert len(comparison["results"]) == 12
+    assert progress_updates[-1][:2] == (12, 12)
+    assert all(model == "primary-model" for _, model in generated_models)

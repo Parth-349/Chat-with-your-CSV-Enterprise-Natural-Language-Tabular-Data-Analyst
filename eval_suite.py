@@ -1,11 +1,13 @@
 """Offline guardrail audit and opt-in live LLM benchmark for CSV analysis."""
 
 import json
+import math
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import pandas as pd
+import numpy as np
 
 from sandbox import classify_failure, execute_pandas_code, get_df_schema_prompt
 
@@ -230,8 +232,16 @@ def _column_context(df: pd.DataFrame) -> Dict[str, Any]:
         group_col = None
 
     misspelled = None
-    if numeric_a:
-        misspelled = f"{numeric_a[:-2]}{numeric_a[-1]}" if numeric_a.endswith("ty") else numeric_a[:-1]
+    if numeric_a is not None:
+        numeric_a_name = str(numeric_a)
+        if len(numeric_a_name) < 2:
+            misspelled = f"{numeric_a_name}_x"
+        else:
+            misspelled = (
+                f"{numeric_a_name[:-2]}{numeric_a_name[-1]}"
+                if numeric_a_name.endswith("ty")
+                else numeric_a_name[:-1]
+            )
 
     return {
         "numeric_a": numeric_a,
@@ -406,8 +416,9 @@ def run_live_llm_eval(
     suite_mode: str = "Fast Subset (6 queries)",
     max_attempts: int = 3,
     executor: Callable[[str, pd.DataFrame], Dict[str, Any]] = execute_pandas_code,
+    progress_callback: Optional[Callable[[int, int, str, str], None]] = None,
 ) -> Dict[str, Any]:
-    """Run real provider calls plus sandbox execution, allowing up to two corrections."""
+    """Run provider calls plus sandbox execution, allowing up to two corrections."""
     selected_routes = _select_routes(routes, provider)
     if not selected_routes:
         raise ValueError(f"No configured API route is available for {provider}.")
@@ -427,19 +438,36 @@ def run_live_llm_eval(
     off_topic_flags: List[bool] = []
     latency_samples: List[float] = []
 
-    for case in suite:
+    total_cases = len(suite)
+    for case_index, case in enumerate(suite, start=1):
+        if progress_callback:
+            progress_callback(
+                case_index - 1,
+                total_cases,
+                case["case_id"],
+                "Running",
+            )
         if not case["enabled"]:
             rows.append(
                 _result_row(case, "Not run", None, "Skipped", 0, 0.0, case["skip_reason"])
             )
+            if progress_callback:
+                progress_callback(case_index, total_cases, case["case_id"], "Skipped")
             continue
 
-        candidates = [
-            (route, model)
-            for route in selected_routes
-            for model in (route.get("primary_model"), route.get("fallback_model"))
-            if model
-        ]
+        if provider == "Auto Router":
+            candidates = [
+                (route, model)
+                for route in selected_routes
+                for model in (route.get("primary_model"), route.get("fallback_model"))
+                if model
+            ]
+        else:
+            candidates = [
+                (route, route["primary_model"])
+                for route in selected_routes
+                if route.get("primary_model")
+            ]
         candidate_index = 0
         current_retry: Optional[Tuple[Mapping[str, Any], str, str, str]] = None
         attempts = 0
@@ -499,7 +527,12 @@ def run_live_llm_eval(
                 passed = expected == "success"
                 passed_at_1 = passed and attempts == 1
                 if passed:
-                    final_status = "Passed" if attempts == 1 else "Passed after retries/fallback"
+                    if attempts == 1:
+                        final_status = "Passed"
+                    elif provider == "Auto Router":
+                        final_status = "Passed after retries/fallback"
+                    else:
+                        final_status = "Passed after retries"
                     if attempts > 1:
                         notes.append(f"Recovered on attempt {attempts}.")
                 else:
@@ -550,6 +583,8 @@ def run_live_llm_eval(
         pass_at_3_flags.append(passed)
         if case["case_id"] == "EDGE-02":
             off_topic_flags.append(passed)
+        if progress_callback:
+            progress_callback(case_index, total_cases, case["case_id"], final_status)
 
     denominator = len(pass_at_3_flags)
     metrics = {
@@ -584,6 +619,7 @@ def compare_providers_eval(
     suite_mode: str = "Fast Subset (6 queries)",
     max_attempts: int = 3,
     executor: Callable[[str, pd.DataFrame], Dict[str, Any]] = execute_pandas_code,
+    progress_callback: Optional[Callable[[int, int, str, str], None]] = None,
 ) -> Dict[str, Any]:
     """Benchmark Groq and Gemini independently and combine their measured results."""
     providers = ("Groq", "Google Gemini")
@@ -592,8 +628,30 @@ def compare_providers_eval(
     if missing:
         raise ValueError(f"Provider comparison requires both API keys; missing: {', '.join(missing)}.")
 
-    provider_results = {
-        provider: run_live_llm_eval(
+    suite = build_benchmark_suite(df)
+    if suite_mode == "Fast Subset (6 queries)":
+        suite = [case for case in suite if case["case_id"] in FAST_SUBSET_CASE_IDS]
+    provider_case_count = len(suite)
+    provider_results = {}
+    for provider_index, provider in enumerate(providers):
+        provider_progress = None
+        if progress_callback:
+            def provider_progress(
+                current: int,
+                total: int,
+                case_id: str,
+                status_msg: str,
+                offset: int = provider_index * provider_case_count,
+                provider_name: str = provider,
+            ) -> None:
+                progress_callback(
+                    offset + current,
+                    provider_case_count * len(providers),
+                    f"{provider_name} · {case_id}",
+                    status_msg,
+                )
+
+        provider_results[provider] = run_live_llm_eval(
             df=df,
             routes=routes,
             generate_pandas_code=generate_pandas_code,
@@ -601,9 +659,8 @@ def compare_providers_eval(
             suite_mode=suite_mode,
             max_attempts=max_attempts,
             executor=executor,
+            progress_callback=provider_progress,
         )
-        for provider in providers
-    }
 
     comparison_rows = []
     combined_results = []
@@ -663,15 +720,46 @@ def export_results_csv(result: Mapping[str, Any]) -> str:
     return result["results"].to_csv(index=False)
 
 
-def export_metrics_json(result: Mapping[str, Any]) -> str:
+def export_metrics_json(
+    result: Mapping[str, Any],
+    offline_security_metrics: Optional[Dict[str, Any]] = None,
+) -> str:
     """Serialize actual evaluation metrics (and provider comparison data) as JSON."""
+
+    def sanitize_json_value(value: Any) -> Any:
+        if value is None or value is pd.NA or value is pd.NaT:
+            return None
+        if isinstance(value, (float, np.floating)):
+            return float(value) if math.isfinite(float(value)) else None
+        if isinstance(value, np.integer):
+            return int(value)
+        if isinstance(value, np.bool_):
+            return bool(value)
+        if isinstance(value, dict):
+            return {
+                key: sanitize_json_value(nested_value)
+                for key, nested_value in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return [sanitize_json_value(nested_value) for nested_value in value]
+        return value
+
     comparison = result.get("provider_comparison")
     if isinstance(comparison, pd.DataFrame):
         comparison = comparison.to_dict(orient="records")
+    metrics = dict(result["metrics"])
+    if offline_security_metrics:
+        for key in (
+            "security_block_rate_pct",
+            "false_positive_rate_pct",
+            "average_sandbox_latency_ms",
+        ):
+            if metrics.get(key) is None and key in offline_security_metrics:
+                metrics[key] = offline_security_metrics[key]
     payload = {
         "mode": result["mode"],
         "run_at": result["run_at"],
-        "metrics": result["metrics"],
-        "provider_comparison": comparison,
+        "metrics": sanitize_json_value(metrics),
+        "provider_comparison": sanitize_json_value(comparison),
     }
     return json.dumps(payload, indent=2, allow_nan=False)

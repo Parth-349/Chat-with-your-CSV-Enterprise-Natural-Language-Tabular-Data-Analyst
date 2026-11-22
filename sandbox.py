@@ -81,6 +81,7 @@ PROHIBITED_METHODS = {
     "read_orc",
     "read_feather",
     "read_gbq",
+    "write_json",
     "to_csv",
     "to_clipboard",
     "to_excel",
@@ -99,6 +100,7 @@ PROHIBITED_METHODS = {
     "savefig",
     "write_html",
     "write_image",
+    "show",
     "imread",
     "imsave",
     "load",
@@ -571,7 +573,8 @@ def get_df_schema_prompt(df: pd.DataFrame) -> str:
         lines.append(f" - `{clean_col}` ({dtype}) | {null_count} nulls | Examples: [{sample_str}]")
 
     lines.append("\nFirst 3 rows preview:")
-    lines.append(df.head(3).to_string(index=False))
+    preview_df = df.iloc[:, :20] if df.shape[1] > 20 else df
+    lines.append(preview_df.head(3).to_string(index=False))
     return "\n".join(lines)
 
 
@@ -599,7 +602,10 @@ def classify_failure(error_msg: str, df: Optional[pd.DataFrame] = None) -> Tuple
         )
 
     if "keyerror" in err_lower or "not in index" in err_lower or "unknown column" in err_lower:
-        col_match = re.search(r"KeyError:\s*['\"]([^'\"]+)['\"]", error_msg)
+        col_match = re.search(
+            r"""KeyError:\s*["'](?:\[\s*["'])?([^"']+)""",
+            error_msg,
+        )
         misspelled = col_match.group(1) if col_match else None
 
         fuzzy_suggestion = ""
@@ -635,8 +641,10 @@ def classify_failure(error_msg: str, df: Optional[pd.DataFrame] = None) -> Tuple
 def generate_suggested_prompts(df: pd.DataFrame) -> List[str]:
     """Dynamically creates dataset-aware sample questions."""
     prompts = []
-    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    categorical_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
+    numeric_cols = df.select_dtypes(include="number").columns.tolist()
+    categorical_cols = df.select_dtypes(
+        include=["object", "string", "category"]
+    ).columns.tolist()
 
     binary_cols = [c for c in numeric_cols if df[c].nunique() == 2]
     continuous_numeric = [c for c in numeric_cols if df[c].nunique() > 5]
