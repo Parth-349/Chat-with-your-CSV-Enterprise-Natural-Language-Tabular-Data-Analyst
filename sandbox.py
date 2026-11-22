@@ -22,6 +22,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 import seaborn as sns
 
 
@@ -35,6 +37,9 @@ ALLOWED_MODULES = {
     "matplotlib",
     "matplotlib.pyplot",
     "seaborn",
+    "plotly",
+    "plotly.express",
+    "plotly.graph_objects",
     "math",
     "statistics",
     "datetime",
@@ -90,8 +95,10 @@ PROHIBITED_METHODS = {
     "to_hdf",
     "to_sql",
     "HDFStore",
-    # NumPy / Matplotlib / Seaborn I/O & network
+    # NumPy / Matplotlib / Seaborn / Plotly I/O & network
     "savefig",
+    "write_html",
+    "write_image",
     "imread",
     "imsave",
     "load",
@@ -276,7 +283,7 @@ def _isolated_worker(code: str, df: pd.DataFrame, conn: Any) -> None:
     Target function executed inside an isolated child worker process.
     - Scrubs all sensitive API keys from environment variables.
     - Runs in restricted globals with SAFE_BUILTINS and pre-injected libraries.
-    - Captures stdout, return values, and figure PNG bytes.
+    - Captures stdout, return values, Matplotlib PNG bytes, and Plotly JSON.
     """
     # 1. Scrub sensitive environment variables inside child process
     for key in list(os.environ.keys()):
@@ -291,6 +298,7 @@ def _isolated_worker(code: str, df: pd.DataFrame, conn: Any) -> None:
 
     error = None
     figure_png = None
+    plotly_json = None
     result_val = None
     result_df = None
 
@@ -306,11 +314,14 @@ def _isolated_worker(code: str, df: pd.DataFrame, conn: Any) -> None:
         "np": np,
         "plt": plt,
         "sns": sns,
+        "px": px,
+        "go": go,
         "math": math,
         "statistics": statistics,
         "datetime": datetime,
         "result": None,
         "result_df": None,
+        "result_fig": None,
     }
 
     try:
@@ -346,6 +357,15 @@ def _isolated_worker(code: str, df: pd.DataFrame, conn: Any) -> None:
 
         result_val = exec_globals.get("result")
         result_df = exec_globals.get("result_df")
+        result_fig = exec_globals.get("result_fig")
+
+        if result_fig is None and isinstance(result_val, go.Figure):
+            result_fig = result_val
+            result_val = None
+        if result_fig is not None:
+            if not isinstance(result_fig, go.Figure):
+                raise TypeError("result_fig must be a Plotly graph_objects.Figure.")
+            plotly_json = result_fig.to_json()
 
         # 4. Handle Series to DataFrame promotion preserving labels/index
         if result_df is None:
@@ -377,6 +397,7 @@ def _isolated_worker(code: str, df: pd.DataFrame, conn: Any) -> None:
             "result": result_val,
             "result_df": result_df,
             "figure_png": figure_png,
+            "plotly_json": plotly_json,
             "error": error,
         })
     except Exception as q_err:
@@ -385,6 +406,7 @@ def _isolated_worker(code: str, df: pd.DataFrame, conn: Any) -> None:
             "result": str(result_val) if result_val is not None else None,
             "result_df": None,
             "figure_png": figure_png,
+            "plotly_json": plotly_json,
             "error": f"SerializationError: {q_err}",
         })
     finally:
@@ -407,6 +429,7 @@ def execute_pandas_code(code: str, df: pd.DataFrame, timeout_seconds: int = 10) 
             "result": None,
             "result_df": None,
             "figure_png": None,
+            "plotly_json": None,
             "figure": None,
             "error": f"Security Restriction: {ast_err}",
             "cleaned_code": cleaned_code,
@@ -427,6 +450,7 @@ def execute_pandas_code(code: str, df: pd.DataFrame, timeout_seconds: int = 10) 
                 "result": None,
                 "result_df": None,
                 "figure_png": None,
+                "plotly_json": None,
                 "error": "Process closed pipe without sending data.",
             }
         process.join(timeout=1)
@@ -453,6 +477,7 @@ def execute_pandas_code(code: str, df: pd.DataFrame, timeout_seconds: int = 10) 
             "result": None,
             "result_df": None,
             "figure_png": None,
+            "plotly_json": None,
             "figure": None,
             "error": f"Execution Timeout: Query took longer than {timeout_seconds} seconds to execute. This may be caused by an infinite loop or heavy computational join.",
             "cleaned_code": cleaned_code,

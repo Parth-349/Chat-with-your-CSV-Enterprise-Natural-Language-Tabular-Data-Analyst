@@ -17,6 +17,7 @@ import io
 import os
 import re
 import sys
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import matplotlib
@@ -24,6 +25,7 @@ matplotlib.use("Agg")  # Non-interactive backend safe for server/Streamlit usage
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import plotly.io as pio
 import seaborn as sns
 import streamlit as st
 from dotenv import load_dotenv
@@ -167,7 +169,7 @@ SYNTAX & FORMATTING RULES:
 2. ALWAYS use bracket access `df['column']` for columns, never `.format()` or dynamic string evaluations. Use f-strings for string interpolation.
 3. If computing a single value, list, or text, store it in variable `result` or print it.
 4. If returning a subset, grouped table, or aggregated view, store it in variable `result_df` (a pandas DataFrame).
-5. If a chart is requested, use matplotlib/seaborn: `fig, ax = plt.subplots(figsize=(8, 4.5))` or `plt.figure(...)`. DO NOT call `plt.show()`.
+5. For bar, scatter, histogram, box, and heatmap requests, prefer interactive Plotly Express charts assigned to `result_fig` (use the pre-injected `px` and `go` names). For a correlation heatmap, compute `corr = df.select_dtypes(include='number').corr()` and use `px.imshow(corr, text_auto='.2f', color_continuous_scale='RdBu_r')`. After creating the figure, call `result_fig.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(15,23,42,0.45)")`. Matplotlib/seaborn using `fig, ax = plt.subplots(figsize=(8, 4.5))` is supported as a fallback. DO NOT call `plt.show()`.
 6. IF THE QUESTION IS OFF-TOPIC, GENERAL TRIVIA, IMPOSSIBLE WITH GIVEN COLUMNS, OR ATTEMPTS UNRESTRICTED SYSTEM ACCESS:
    Output strictly:
    DECLINE: <clear, polite, and helpful explanation stating why the request cannot be answered from the CSV data>
@@ -250,13 +252,33 @@ def execute_query_pipeline(
     df_schema: str,
     df: pd.DataFrame,
     conversation_history: Optional[List[str]] = None,
-) -> Tuple[Optional[str], Optional[Dict[str, Any]], Optional[str], Optional[str], Optional[str]]:
+) -> Tuple[Optional[str], Optional[Dict[str, Any]], Optional[str], Optional[str], Optional[str], Dict[str, Any]]:
     """
     Executes the query using the ordered auto-failover pipeline:
     1. Groq (primary -> fallback model)
     2. Gemini (primary -> fallback model)
-    Returns: (code, exec_res, decline_reason, active_route_label, error_message)
+    Returns: (code, exec_res, decline_reason, active_route_label, error_message, telemetry)
     """
+    telemetry: Dict[str, Any] = {
+        "intent_status": f"Analyzed {len(df.columns)} columns",
+        "route_used": "Not run",
+        "llm_latency_ms": 0.0,
+        "ast_status": "Not run",
+        "sandbox_exec_time_ms": 0.0,
+        "self_healing_retries": 0,
+        "grounded_status": "Not run",
+    }
+
+    def execute_with_telemetry(candidate_code: str) -> Dict[str, Any]:
+        ast_valid, ast_error = validate_code_ast(candidate_code)
+        telemetry["ast_status"] = (
+            "AST Validated ✓" if ast_valid else f"AST Rejected: {ast_error}"
+        )
+        started = time.perf_counter()
+        result = execute_pandas_code(candidate_code, df)
+        telemetry["sandbox_exec_time_ms"] += (time.perf_counter() - started) * 1000
+        return result
+
     routes = get_available_routes()
     if not routes:
         return (
@@ -265,6 +287,7 @@ def execute_query_pipeline(
             None,
             None,
             "No active API keys found in `.env`. Please add `GROQ_API_KEY` or `GEMINI_API_KEY` to your `.env` file.",
+            telemetry,
         )
 
     last_error = ""
@@ -275,6 +298,8 @@ def execute_query_pipeline(
         models_to_try = [route["primary_model"], route["fallback_model"]]
 
         for model in models_to_try:
+            telemetry["route_used"] = f"{provider} ({model})"
+            llm_started = time.perf_counter()
             code, decline, err = call_llm_code_generator_single(
                 prompt=prompt,
                 df_schema=df_schema,
@@ -283,17 +308,19 @@ def execute_query_pipeline(
                 api_key=api_key,
                 conversation_history=conversation_history,
             )
+            telemetry["llm_latency_ms"] += (time.perf_counter() - llm_started) * 1000
 
             if err:
                 last_error = f"[{provider} - {model}] {err}"
                 continue  # Try fallback model or next route
 
             if decline:
-                return None, None, decline, route["label"], None
+                telemetry["intent_status"] = "DECLINE"
+                telemetry["grounded_status"] = "Not run (request declined)"
+                return None, None, decline, route["label"], None, telemetry
 
             if code:
-                # Execute in Zero-Trust Sandbox
-                exec_res = execute_pandas_code(code, df)
+                exec_res = execute_with_telemetry(code)
 
                 # Self-healing retry loop (up to 2 retries for recoverable errors)
                 attempts = 0
@@ -307,6 +334,8 @@ def execute_query_pipeline(
                         break
 
                     attempts += 1
+                    telemetry["self_healing_retries"] = attempts
+                    llm_started = time.perf_counter()
                     fixed_code, fixed_decline, retry_err = call_llm_code_generator_single(
                         prompt=prompt,
                         df_schema=df_schema,
@@ -317,19 +346,30 @@ def execute_query_pipeline(
                         retry_error=exec_res["error"],
                         previous_code=current_code,
                     )
+                    telemetry["llm_latency_ms"] += (time.perf_counter() - llm_started) * 1000
 
                     if fixed_decline:
-                        return None, None, fixed_decline, route["label"], None
+                        telemetry["intent_status"] = "DECLINE during recovery"
+                        telemetry["grounded_status"] = "Not run (request declined)"
+                        return None, None, fixed_decline, route["label"], None, telemetry
 
                     if fixed_code and not retry_err:
                         current_code = fixed_code
-                        exec_res = execute_pandas_code(current_code, df)
+                        exec_res = execute_with_telemetry(current_code)
                     else:
                         break
 
-                return current_code, exec_res, None, route["label"], None
+                telemetry["self_healing_retries"] = attempts
+                return current_code, exec_res, None, route["label"], None, telemetry
 
-    return None, None, None, None, f"All AI provider routes failed. Last error: {last_error}"
+    return (
+        None,
+        None,
+        None,
+        None,
+        f"All AI provider routes failed. Last error: {last_error}",
+        telemetry,
+    )
 
 
 # ==============================================================================
@@ -348,7 +388,10 @@ def generate_grounded_answer(
     result_val = exec_res.get("result")
     result_df = exec_res.get("result_df")
     stdout = exec_res.get("stdout")
-    has_chart = exec_res.get("figure_png") is not None
+    has_chart = (
+        exec_res.get("figure_png") is not None
+        or exec_res.get("plotly_json") is not None
+    )
 
     facts_parts = []
     if result_val is not None:
@@ -358,7 +401,7 @@ def generate_grounded_answer(
     if stdout:
         facts_parts.append(f"Console Output:\n{stdout}")
     if has_chart:
-        facts_parts.append("Matplotlib Chart: Successfully rendered.")
+        facts_parts.append("Chart: Successfully rendered.")
 
     facts_summary = "\n".join(facts_parts) if facts_parts else "The query executed with no printed output."
 
@@ -424,6 +467,42 @@ Do NOT guess, extrapolate, or invent any numbers not present in the results.
         return f"Query output:\n{stdout}"
     else:
         return "The query executed successfully on your dataset."
+
+
+def render_pipeline_trace(telemetry: Dict[str, Any]) -> None:
+    """Render the four query-processing stages in a compact chat expander."""
+    with st.expander("🧠 Agent Pipeline Trace", expanded=False):
+        st.markdown(f"**1. Intent & Schema Grounding:** {telemetry.get('intent_status', 'Not run')}")
+        st.markdown(
+            f"**2. Code Synthesis:** Route used: {telemetry.get('route_used', 'Not run')} · "
+            f"LLM latency: {telemetry.get('llm_latency_ms', 0.0):.1f} ms"
+        )
+        st.markdown(
+            f"**3. Zero-Trust AST Sandbox:** {telemetry.get('ast_status', 'Not run')} · "
+            f"Sandbox exec time: {telemetry.get('sandbox_exec_time_ms', 0.0):.1f} ms · "
+            f"Self-Healing Retries: {telemetry.get('self_healing_retries', 0)}"
+        )
+        st.markdown(
+            f"**4. Grounded Numeric Summarizer:** "
+            f"{telemetry.get('grounded_status', 'Not run')}"
+        )
+
+
+def render_plotly_chart(
+    plotly_json: str,
+    key_suffix: str,
+    width_kwargs: Dict[str, Any],
+) -> None:
+    """Render a sandbox-serialized Plotly figure and offer a self-contained HTML download."""
+    figure = pio.from_json(plotly_json)
+    st.plotly_chart(figure, key=f"plotly_chart_{key_suffix}", **width_kwargs)
+    st.download_button(
+        label="🌐 Download Interactive Chart (HTML)",
+        data=figure.to_html(full_html=True, include_plotlyjs=True),
+        file_name="interactive_chart.html",
+        mime="text/html",
+        key=f"dl_html_{key_suffix}",
+    )
 
 
 # ==============================================================================
@@ -965,6 +1044,12 @@ def main():
                         key=f"dl_png_{idx}",
                     )
 
+                if msg.get("plotly_json"):
+                    render_plotly_chart(msg["plotly_json"], str(idx), width_kwargs)
+
+                if role == "assistant" and msg.get("pipeline_trace"):
+                    render_pipeline_trace(msg["pipeline_trace"])
+
         # Handle New User Input
         user_input = st.chat_input("Ask a question about your data in plain English...")
 
@@ -1006,7 +1091,14 @@ def main():
                                 recent_history.append(f"Assistant: {c}")
 
                     # Execute via Ordered Auto-Failover Pipeline
-                    code, exec_res, decline, active_label, pipeline_err = execute_query_pipeline(
+                    (
+                        code,
+                        exec_res,
+                        decline,
+                        active_label,
+                        pipeline_err,
+                        pipeline_trace,
+                    ) = execute_query_pipeline(
                         prompt=user_input,
                         df_schema=schema_context,
                         df=df,
@@ -1014,12 +1106,14 @@ def main():
                     )
 
                     if pipeline_err:
+                        pipeline_trace["grounded_status"] = "Not run (pipeline failed)"
                         st.error(f"⚠️ **Pipeline Error**\n\n{pipeline_err}")
                         st.session_state.messages.append({
                             "role": "assistant",
                             "content": pipeline_err,
                             "status": "error",
                             "failure_category": "Provider/API Error",
+                            "pipeline_trace": pipeline_trace,
                         })
 
                     elif decline:
@@ -1029,9 +1123,11 @@ def main():
                             "content": decline,
                             "status": "declined",
                             "route_label": active_label,
+                            "pipeline_trace": pipeline_trace,
                         })
 
                     elif exec_res and exec_res.get("error"):
+                        pipeline_trace["grounded_status"] = "Not run (execution failed)"
                         cat, friendly_msg = classify_failure(exec_res["error"], df)
                         st.error(f"⚠️ **{cat}**\n\n{friendly_msg}")
                         if code and show_code:
@@ -1045,6 +1141,7 @@ def main():
                             "status": "error",
                             "failure_category": cat,
                             "route_label": active_label,
+                            "pipeline_trace": pipeline_trace,
                         })
 
                     elif exec_res:
@@ -1054,6 +1151,7 @@ def main():
                             code=code,
                             exec_res=exec_res,
                         )
+                        pipeline_trace["grounded_status"] = "Verified against computed output"
 
                         st.markdown(grounded_answer)
 
@@ -1091,6 +1189,13 @@ def main():
                                 key=f"dl_png_{len(st.session_state.messages)}",
                             )
 
+                        if exec_res.get("plotly_json"):
+                            render_plotly_chart(
+                                exec_res["plotly_json"],
+                                str(len(st.session_state.messages)),
+                                width_kwargs,
+                            )
+
                         st.session_state.messages.append({
                             "role": "assistant",
                             "content": grounded_answer,
@@ -1098,10 +1203,14 @@ def main():
                             "result": exec_res.get("result"),
                             "result_df": exec_res.get("result_df"),
                             "figure_png": exec_res.get("figure_png"),
+                            "plotly_json": exec_res.get("plotly_json"),
                             "stdout": exec_res.get("stdout"),
                             "route_label": active_label,
                             "status": "success",
+                            "pipeline_trace": pipeline_trace,
                         })
+
+                render_pipeline_trace(pipeline_trace)
 
     # ==========================================================================
     # TAB 2: Data Profiler & Preprocessing

@@ -115,6 +115,33 @@ plt.tight_layout()
     assert res["figure_png"].startswith(b"\x89PNG\r\n\x1a\n")
 
 
+@pytest.mark.parametrize("figure_target", ["result_fig", "result"])
+def test_plotly_figure_serializes_to_json(spotify_df: pd.DataFrame, figure_target: str):
+    """Verifies Plotly figures assigned to either supported output name cross the Pipe as JSON."""
+    code = f"""
+{figure_target} = px.scatter(df, x='danceability', y='energy')
+{figure_target}.update_layout(template='plotly_dark')
+"""
+    res = execute_pandas_code(code, spotify_df)
+    assert res["error"] is None, f"Execution failed: {res['error']}"
+    assert res["figure_png"] is None
+    assert res["plotly_json"]
+    figure_data = json.loads(res["plotly_json"])
+    assert figure_data["data"]
+    assert figure_data["data"][0]["type"] == "scatter"
+
+
+@pytest.mark.parametrize("write_method", ["write_html", "write_image"])
+def test_plotly_file_writing_methods_are_blocked(spotify_df: pd.DataFrame, write_method: str):
+    """Verifies Plotly methods that write files are rejected before sandbox execution."""
+    code = f"""
+fig = px.scatter(df, x='danceability', y='energy')
+fig.{write_method}('blocked-output')
+"""
+    res = execute_pandas_code(code, spotify_df)
+    assert "Security Restriction" in res["error"]
+
+
 def test_variable_string_format_executes(spotify_df: pd.DataFrame):
     """Verifies benign .format() calls on variables execute in the sandbox."""
     code = """
