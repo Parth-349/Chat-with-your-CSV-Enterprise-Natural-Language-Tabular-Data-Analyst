@@ -142,7 +142,7 @@ The Groq fast subset gained **16.67 percentage points** from Pass@1 to Pass@3. I
 
 | Member | Role | Contributions |
 | :--- | :--- | :--- |
-| [Member Name] | AI Data Chat | Routing, prompt-to-code generation, grounded responses, and chat UI |
-| [Member Name] | Security & Sandbox | AST validation, isolated execution, and security testing |
-| [Member Name] | Profiler & Preprocessing | Data health analysis, preprocessing, and deterministic Auto-EDA |
-| [Member Name] | Evaluation & Integration | Benchmarking, UI integration, testing, and documentation |
+| Sahil Talokar | AI Data Chat | Routing, prompt-to-code generation, grounded responses, and chat UI |
+| Parth Ubahd | Security & Sandbox | AST validation, isolated execution, and security testing |
+| Pranav Gandhle | Profiler & Preprocessing | Data health analysis, preprocessing, and deterministic Auto-EDA |
+| Rohit Kisave | Evaluation & Integration | Benchmarking, UI integration, testing, and documentation |
